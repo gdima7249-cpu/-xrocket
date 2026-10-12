@@ -28,4 +28,9 @@ SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
 TIMEFRAME = os.getenv("TIMEFRAME", "1h")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+# Общий стоп-кран: при падении капитала до (1 - MAX_TOTAL_LOSS_PCT) от стартового
+# бот продаёт позицию и полностью останавливается. 0.20 = стоп при 800 из 1000.
+MAX_TOTAL_LOSS_PCT = float(os.getenv("MAX_TOTAL_LOSS_PCT", "0.20"))
+# Либо абсолютный порог капитала в USDT (если задан — важнее процента)
+STOP_EQUITY = float(os.getenv("STOP_EQUITY")) if os.getenv("STOP_EQUITY") else None
 START_BALANCE = float(os.getenv("PAPER_BALANCE", "1000"))  # в котируемой валюте (USDT), для paper и бэктеста

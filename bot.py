@@ -46,6 +46,9 @@ class Bot:
         self.ex.load_markets()
         self.base, self.quote = config.SYMBOL.split("/")
         self.state = self.load_state()
+        if "start_equity" not in self.state:
+            self.state["start_equity"] = (config.START_BALANCE if self.mode == "paper"
+                                          else self.equity())
 
     # ---------- состояние ----------
     def load_state(self):
@@ -72,7 +75,8 @@ class Bot:
         if self.mode == "paper":
             return self.state["cash"], self.state["qty"]
         b = self.ex.fetch_balance()
-        return b[self.quote]["free"], b[self.base]["free"]
+        # позиция бота — из state (чужие монеты на кошельке не трогаем)
+        return b[self.quote]["free"], min(self.state["qty"], b[self.base]["free"])
 
     def equity(self) -> float:
         cash, qty = self.balances()
@@ -126,6 +130,28 @@ class Bot:
             self.state.update(day=today, day_start_equity=eq)
         return eq < self.state["day_start_equity"] * (1 - self.p.max_daily_loss_pct)
 
+    # ---------- общий стоп-кран ----------
+    def equity_floor(self) -> float:
+        if config.STOP_EQUITY is not None:
+            return config.STOP_EQUITY
+        return self.state["start_equity"] * (1 - config.MAX_TOTAL_LOSS_PCT)
+
+    def kill_switch(self) -> bool:
+        """True, если торговля остановлена. Остановка необратима до удаления state.json."""
+        if self.state.get("halted"):
+            return True
+        eq, floor = self.equity(), self.equity_floor()
+        if eq > floor:
+            return False
+        if self.balances()[1] > 0:
+            self.sell(self.price(), "kill-switch")
+        self.state["halted"] = True
+        self.save_state()
+        notify(f"СТОП: капитал {eq:.4f} {self.quote} достиг лимита {floor:.4f} "
+               f"(старт {self.state['start_equity']:.4f}). Бот остановлен. "
+               f"Чтобы начать заново, удалите {STATE_FILE}.")
+        return True
+
     # ---------- цикл ----------
     def check_stops(self):
         if self.state["qty"] <= 0 and self.mode == "paper":
@@ -160,6 +186,9 @@ class Bot:
         last_candle = None
         while True:
             try:
+                if self.kill_switch():
+                    return log.info("Торговля остановлена (стоп-кран). "
+                                    "Для нового запуска удалите %s", STATE_FILE)
                 self.check_stops()
                 cur = int(time.time() // tf_sec)
                 if cur != last_candle:      # новая свеча закрылась
