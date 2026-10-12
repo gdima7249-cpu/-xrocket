@@ -1,6 +1,7 @@
-"""Торговый бот. Режимы (MODE в .env): paper | testnet | live.
+"""Торговый бот. Режимы (MODE в .env): paper | demo | testnet | live.
 
 paper   — реальные цены, виртуальный баланс, ордера не отправляются
+demo    — демо-торговля биржи с виртуальными деньгами (Bybit Demo, нужны демо-ключи)
 testnet — ордера на песочнице биржи (нужны testnet-ключи)
 live    — РЕАЛЬНЫЕ деньги
 """
@@ -102,7 +103,8 @@ class Bot:
             self.state["cash"] -= qty * price * (1 + self.p.fee)
             self.state["qty"], self.state["entry"] = qty, price
         else:
-            order = self.ex.create_market_buy_order(config.SYMBOL, qty)
+            # цена нужна ccxt, чтобы пересчитать количество в сумму (Bybit spot и др.)
+            order = self.ex.create_order(config.SYMBOL, "market", "buy", qty, price)
             self.state["entry"] = order.get("average") or price
             self.state["qty"] = qty
         notify(f"BUY {qty} {self.base} @ {price:.2f}")
