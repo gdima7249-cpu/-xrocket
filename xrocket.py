@@ -50,7 +50,7 @@ class XRocketPublic:
         return {"limits": {"cost": {"min": 0}}}
 
     def amount_to_precision(self, symbol, amount):
-        return f"{int(amount * 1e6) / 1e6:.6f}"
+        return f"{int(amount * 1e8) / 1e8:.8f}"
 
     def parse_timeframe(self, tf):
         return TF_SEC[tf]

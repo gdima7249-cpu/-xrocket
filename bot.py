@@ -51,9 +51,14 @@ class Bot:
     def load_state(self):
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE) as f:
-                return json.load(f)
+                st = json.load(f)
+            # Сменили PAPER_BALANCE -> начинаем с чистого виртуального счёта
+            if st.get("start_balance") == config.START_BALANCE:
+                return st
+            log.info("PAPER_BALANCE изменён — виртуальный счёт сброшен")
         return {"cash": config.START_BALANCE, "qty": 0.0, "entry": 0.0,
-                "day": "", "day_start_equity": config.START_BALANCE}
+                "day": "", "day_start_equity": config.START_BALANCE,
+                "start_balance": config.START_BALANCE}
 
     def save_state(self):
         with open(STATE_FILE, "w") as f:

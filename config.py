@@ -28,4 +28,4 @@ SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
 TIMEFRAME = os.getenv("TIMEFRAME", "1h")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-START_BALANCE = 1000.0  # для paper и бэктеста
+START_BALANCE = float(os.getenv("PAPER_BALANCE", "1000"))  # в котируемой валюте (USDT), для paper и бэктеста
