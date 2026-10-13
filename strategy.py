@@ -20,20 +20,24 @@ def add_indicators(df: pd.DataFrame, p: Params) -> pd.DataFrame:
     return df
 
 
-def signal(df: pd.DataFrame, p: Params) -> str | None:
-    """Сигнал по последней ЗАКРЫТОЙ свече: 'buy', 'sell' или None.
-
-    buy  — быстрая EMA пересекла медленную снизу вверх и RSI не перегрет
-    sell — быстрая EMA пересекла медленную сверху вниз
-    """
+def cross(df: pd.DataFrame, p: Params) -> str | None:
+    """Пересечение EMA на последней закрытой свече: 'up', 'down' или None."""
     if len(df) < p.ema_slow + 2:
         return None
     prev, cur = df.iloc[-2], df.iloc[-1]
-    crossed_up = prev.ema_fast <= prev.ema_slow and cur.ema_fast > cur.ema_slow
-    crossed_down = prev.ema_fast >= prev.ema_slow and cur.ema_fast < cur.ema_slow
-    if crossed_up and cur.rsi < p.rsi_max_entry:
+    if prev.ema_fast <= prev.ema_slow and cur.ema_fast > cur.ema_slow:
+        return "up"
+    if prev.ema_fast >= prev.ema_slow and cur.ema_fast < cur.ema_slow:
+        return "down"
+    return None
+
+
+def signal(df: pd.DataFrame, p: Params) -> str | None:
+    """Сигнал для споты: 'buy' (пересечение вверх, RSI не перегрет), 'sell' (вниз)."""
+    c = cross(df, p)
+    if c == "up" and df.iloc[-1].rsi < p.rsi_max_entry:
         return "buy"
-    if crossed_down:
+    if c == "down":
         return "sell"
     return None
 
@@ -44,3 +48,10 @@ def position_size(equity: float, price: float, p: Params) -> float:
     qty = risk_amount / (price * p.stop_loss_pct)
     max_qty = equity * p.max_position_pct / price
     return min(qty, max_qty)
+
+
+def position_size_futures(equity: float, price: float, p: Params, leverage: float) -> float:
+    """Размер позиции (в монете): риск = risk_per_trade капитала при стопе stop_loss_pct,
+    но не больше max_position_pct * капитал * плечо по номиналу."""
+    qty = equity * p.risk_per_trade / (price * p.stop_loss_pct)
+    return min(qty, equity * leverage * p.max_position_pct / price)

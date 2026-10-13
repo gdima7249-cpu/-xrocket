@@ -40,12 +40,13 @@ class Bot:
     def __init__(self):
         self.p = Params()
         self.mode = config.MODE
-        self.ex = make_exchange(config.EXCHANGE, self.mode, config.API_KEY, config.API_SECRET)
+        self.ex = make_exchange(config.EXCHANGE, self.mode, config.API_KEY, config.API_SECRET,
+                                 config.MARKET)
         if self.mode == "live":
             if input("MODE=live: реальные деньги! Введите YES для продолжения: ") != "YES":
                 raise SystemExit("Отменено")
         self.ex.load_markets()
-        self.base, self.quote = config.SYMBOL.split("/")
+        self.base, self.quote = config.SYMBOL.split(":")[0].split("/")
         self.state = self.load_state()
         if "start_equity" not in self.state:
             self.state["start_equity"] = (config.START_BALANCE if self.mode == "paper"
@@ -57,12 +58,13 @@ class Bot:
             with open(STATE_FILE) as f:
                 st = json.load(f)
             # Сменили PAPER_BALANCE -> начинаем с чистого виртуального счёта
-            if st.get("start_balance") == config.START_BALANCE:
+            if (st.get("start_balance") == config.START_BALANCE
+                    and st.get("market", "spot") == config.MARKET):
                 return st
-            log.info("PAPER_BALANCE изменён — виртуальный счёт сброшен")
+            log.info("PAPER_BALANCE или MARKET изменён — виртуальный счёт сброшен")
         return {"cash": config.START_BALANCE, "qty": 0.0, "entry": 0.0,
                 "day": "", "day_start_equity": config.START_BALANCE,
-                "start_balance": config.START_BALANCE}
+                "start_balance": config.START_BALANCE, "market": config.MARKET}
 
     def save_state(self):
         with open(STATE_FILE, "w") as f:
@@ -206,4 +208,8 @@ class Bot:
 
 
 if __name__ == "__main__":
-    Bot().run()
+    if config.MARKET == "futures":
+        from futures_bot import FuturesBot
+        FuturesBot().run()
+    else:
+        Bot().run()

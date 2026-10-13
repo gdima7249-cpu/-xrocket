@@ -10,7 +10,8 @@ class Params:
     ema_fast: int = 20
     ema_slow: int = 50
     rsi_period: int = 14
-    rsi_max_entry: float = 70.0     # не входить, если рынок перегрет
+    rsi_max_entry: float = 70.0     # не открывать long, если рынок перегрет
+    rsi_min_entry: float = 30.0     # не открывать short, если рынок перепродан
     stop_loss_pct: float = 0.03     # стоп 3%
     take_profit_pct: float = 0.06   # тейк 6%
     risk_per_trade: float = 0.01    # рисковать 1% капитала на сделку
@@ -21,6 +22,8 @@ class Params:
 
 
 MODE = os.getenv("MODE", "paper")
+MARKET = os.getenv("MARKET", "spot")          # spot (только покупки) | futures (long и short)
+LEVERAGE = float(os.getenv("LEVERAGE", "2"))   # плечо для futures, от 1 до 5
 EXCHANGE = os.getenv("EXCHANGE", "xrocket")
 API_KEY = os.getenv("API_KEY", "")
 API_SECRET = os.getenv("API_SECRET", "")

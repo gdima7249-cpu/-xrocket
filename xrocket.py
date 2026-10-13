@@ -72,7 +72,7 @@ class XRocketPublic:
             chunk_end = min(end, cur + n * step)
             try:
                 data = self._get("/api/v1/candles", {
-                    "symbol": symbol.replace("/", "-"), "type": TF[timeframe],
+                    "symbol": symbol.split(":")[0].replace("/", "-"), "type": TF[timeframe],
                     "startAt": _iso(cur), "endAt": _iso(chunk_end)})
             except IntervalTooBig:
                 if n <= MIN_CANDLES:

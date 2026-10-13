@@ -8,7 +8,7 @@ import argparse
 from dataclasses import replace
 
 import config
-from backtest import run
+from backtest import run, run_futures
 from config import Params
 from data import fetch_history, synthetic
 from exchanges import make_exchange
@@ -18,8 +18,8 @@ EMA_PAIRS = [(5, 20), (10, 30), (20, 50)]
 STOP_TAKE = [(0.01, 0.02), (0.02, 0.04), (0.03, 0.06)]
 
 
-def stats(df, p):
-    final, trades, curve = run(df, p)
+def stats(df, p, runner=run):
+    final, trades, curve = runner(df, p)
     start = config.START_BALANCE
     dd = ((curve.cummax() - curve) / curve.cummax()).max() if len(curve) else 0
     wins = sum(t > 0 for t in trades)
@@ -31,9 +31,11 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=30)
     ap.add_argument("--synthetic", action="store_true")
+    ap.add_argument("--market", default=config.MARKET, choices=["spot", "futures"])
     a = ap.parse_args()
-    ex = None if a.synthetic else make_exchange(config.EXCHANGE)
+    ex = None if a.synthetic else make_exchange(config.EXCHANGE, market=a.market)
 
+    runner = run_futures if a.market == "futures" else run
     rows = []
     for tf in TIMEFRAMES:
         df = synthetic(3000) if a.synthetic else fetch_history(ex, config.SYMBOL, tf, a.days)
@@ -43,7 +45,7 @@ if __name__ == "__main__":
         print(f"{tf}: свечей {len(df)}, B&H на проверочной части {bh:+.1f}%")
         for (f, s), (sl, tp) in [(e, st) for e in EMA_PAIRS for st in STOP_TAKE]:
             p = replace(Params(), ema_fast=f, ema_slow=s, stop_loss_pct=sl, take_profit_pct=tp)
-            rows.append((tf, f, s, sl, tp, stats(train, p), stats(test, p), bh))
+            rows.append((tf, f, s, sl, tp, stats(train, p, runner), stats(test, p, runner), bh))
 
     rows.sort(key=lambda r: r[5]["ret"], reverse=True)
     print("\nТоп-10 по обучающей части (проверочная — честная оценка):")

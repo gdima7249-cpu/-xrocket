@@ -27,6 +27,13 @@
 риск на сделку (1%), максимум позиции (50%), дневной лимит убытка (3%), комиссия.
 Пара, таймфрейм, биржа, ключи, Telegram — `.env`.
 
+## Фьючерсы (long и short)
+    MARKET=futures, SYMBOL=BTC/USDT:USDT (для paper на xRocket можно BTC/USDT), LEVERAGE=2
+Пересечение EMA вверх -> long, вниз -> short. Изолированная маржа, плечо до 5, стоп/тейк на бирже,
+общий стоп-кран. Бэктест: `python backtest.py --market futures --days 30`,
+подбор: `python optimize.py --market futures --days 30`. Paper моделирует маржу, комиссии и ликвидацию.
+Сумма должна покрывать минимальный ордер контракта (`python check_exchange.py` покажет его).
+
 ## Bybit
     EXCHANGE=bybit, MODE=demo (демо-ключи Bybit Demo Trading), SYMBOL=BTC/USDT
     python check_exchange.py   # безопасная проверка: рынки, мин. ордер, баланс (ордера не шлёт)
