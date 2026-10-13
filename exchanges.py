@@ -16,10 +16,13 @@ def make_exchange(name: str, mode: str = "paper", api_key: str = "", secret: str
     if mode in ("demo", "testnet", "live"):
         opts.update(apiKey=api_key, secret=secret)
     ex = getattr(ccxt, name)(opts)
-    if mode == "testnet":
-        ex.set_sandbox_mode(True)
-    elif mode == "demo":  # демо-торговля биржи (например, Bybit Demo Trading)
-        if not hasattr(ex, "enable_demo_trading"):
-            raise SystemExit(f"{name}: демо-режим в ccxt не поддерживается, используйте testnet")
-        ex.enable_demo_trading(True)
+    if mode in ("testnet", "demo"):
+        try:
+            if mode == "testnet":
+                ex.set_sandbox_mode(True)
+            else:  # демо-торговля биржи (например, Bybit Demo Trading)
+                ex.enable_demo_trading(True)
+        except (KeyError, TypeError, ccxt.NotSupported):
+            raise SystemExit(f"{name}: режим {mode} в ccxt не поддерживается. "
+                             "Используйте MODE=paper (виртуальные деньги) или live (реальные).")
     return ex
