@@ -182,7 +182,7 @@ class Bot:
         sig = signal(df, self.p)
         _, qty = self.balances()
         price = self.price()
-        log.info("price=%.2f rsi=%.1f ema=%.1f/%.1f signal=%s pos=%s",
+        log.info("price=%.6g rsi=%.1f ema=%.6g/%.6g signal=%s pos=%s",
                  price, df.iloc[-1].rsi, df.iloc[-1].ema_fast, df.iloc[-1].ema_slow, sig, qty)
         if sig == "buy" and qty == 0:
             if self.daily_loss_exceeded():

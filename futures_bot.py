@@ -155,7 +155,7 @@ class FuturesBot(Bot):
         c, cur = cross(df, p), df.iloc[-1]
         self.sync()
         side, price = self.state.get("side"), self.price()
-        log.info("price=%.2f rsi=%.1f ema=%.1f/%.1f cross=%s pos=%s",
+        log.info("price=%.6g rsi=%.1f ema=%.6g/%.6g cross=%s pos=%s",
                  price, cur.rsi, cur.ema_fast, cur.ema_slow, c, side)
         if c == "up":
             if side == "short":
