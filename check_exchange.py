@@ -29,7 +29,7 @@ if mode != "paper" and config.API_KEY:
     quote = config.SYMBOL.split("/")[1]
     print(f"Баланс {quote}: свободно {bal.get(quote, {}).get('free')}, всего {bal.get(quote, {}).get('total')}")
     print("Ключи работают.")
-    if config.EXCHANGE == "xrocket" and not bal.get(quote, {}).get("free"):
+    if config.EXCHANGE == "xrocket" and not bal[quote]["free"]:
         print("На ТОРГОВОМ балансе нет средств: переведите их с основного (Funding) на торговый (Trading).")
 else:
     print("Ключи не заданы — проверены только публичные данные.")
