@@ -22,6 +22,9 @@ class Params:
 
 
 MODE = os.getenv("MODE", "paper")
+STRATEGY = os.getenv("STRATEGY", "ema_rsi")    # ema_rsi | donchian (только спот)
+DONCHIAN_IN = int(os.getenv("DONCHIAN_IN", "40"))    # вход: закрытие выше максимума за N свечей
+DONCHIAN_OUT = int(os.getenv("DONCHIAN_OUT", "20"))  # выход: закрытие ниже минимума за M свечей
 MARKET = os.getenv("MARKET", "spot")          # spot (только покупки) | futures (long и short)
 LEVERAGE = float(os.getenv("LEVERAGE", "2"))   # плечо для futures, от 1 до 5
 EXCHANGE = os.getenv("EXCHANGE", "xrocket")

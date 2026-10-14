@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+import config
 from config import Params
 
 
@@ -55,3 +56,16 @@ def position_size_futures(equity: float, price: float, p: Params, leverage: floa
     но не больше max_position_pct * капитал * плечо по номиналу."""
     qty = equity * p.risk_per_trade / (price * p.stop_loss_pct)
     return min(qty, equity * leverage * p.max_position_pct / price)
+
+
+def signal_for(df: pd.DataFrame, p: Params) -> str | None:
+    """Сигнал выбранной стратегии (STRATEGY в .env) по последней закрытой свече: 'buy', 'sell' или None."""
+    if config.STRATEGY == "donchian":
+        from strategies import donchian
+        en, ex_ = donchian(df, config.DONCHIAN_IN, config.DONCHIAN_OUT)
+        if bool(en.iloc[-1]):
+            return "buy"
+        if bool(ex_.iloc[-1]):
+            return "sell"
+        return None
+    return signal(df, p)

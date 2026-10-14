@@ -18,7 +18,7 @@ import requests
 import config
 from config import Params
 from exchanges import make_exchange
-from strategy import add_indicators, position_size, signal
+from strategy import add_indicators, position_size, signal_for
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
@@ -179,7 +179,7 @@ class Bot:
 
     def step(self):
         df = self.candles()
-        sig = signal(df, self.p)
+        sig = signal_for(df, self.p)
         _, qty = self.balances()
         price = self.price()
         log.info("price=%.6g rsi=%.1f ema=%.6g/%.6g signal=%s pos=%s",
@@ -193,7 +193,7 @@ class Bot:
             self.sell(price, "signal")
 
     def run(self):
-        notify(f"Бот запущен: {config.SYMBOL} {config.TIMEFRAME} mode={self.mode}")
+        notify(f"Бот запущен: {config.SYMBOL} {config.TIMEFRAME} mode={self.mode} strategy={config.STRATEGY}")
         tf_sec = self.ex.parse_timeframe(config.TIMEFRAME)
         last_candle = None
         while True:
