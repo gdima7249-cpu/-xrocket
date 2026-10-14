@@ -56,6 +56,14 @@ def stats_text(s):
         else:
             lines.append(f"  {st:<15}{0:>7}{'-':>6}{'-':>16}{'-':>9}")
 
+    if s["open"]:
+        lines += ["", "Открытые позиции:", f"  {'стратегия':<15}{'пара':<14}{'цена входа':>12}{'количество':>12}  открыта"]
+        for k, v in sorted(s["open"].items(), key=lambda kv: kv[1].get("t", 0)):
+            st, sym = k.split("|")
+            qty = f"{v['qty']:.6g}" if v.get("qty") else "-"
+            opened = datetime.fromtimestamp(v["t"]).strftime("%m-%d %H:%M") if v.get("t") else "-"
+            lines.append(f"  {st:<15}{sym:<14}{v['entry']:>12.6g}{qty:>12}  {opened}")
+
     def day(c):
         return datetime.fromtimestamp(c.get("t0", c["t"])).strftime("%Y-%m-%d")
 
