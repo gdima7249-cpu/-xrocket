@@ -17,8 +17,8 @@ class Params:
     risk_per_trade: float = 0.01    # рисковать 1% капитала на сделку
     max_position_pct: float = 0.5   # не более 50% капитала в одной позиции
     max_daily_loss_pct: float = 0.03  # стоп-торговля на день при -3%
-    fee: float = 0.001              # комиссия 0.1% за сторону
-    slippage: float = 0.0005        # проскальзывание 0.05%
+    fee: float = float(os.getenv("FEE", "0.001"))              # комиссия за сторону (xRocket ≈ 0.003)
+    slippage: float = float(os.getenv("SLIPPAGE", "0.0005"))   # проскальзывание (xRocket ≈ 0.0025)
 
 
 MODE = os.getenv("MODE", "paper")
