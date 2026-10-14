@@ -107,6 +107,10 @@ class Bot:
         else:
             # цена нужна ccxt, чтобы пересчитать количество в сумму (Bybit spot и др.)
             order = self.ex.create_order(config.SYMBOL, "market", "buy", qty, price)
+            if order.get("fill_checked"):          # биржа подтвердила фактическое исполнение
+                if not order["filled"]:
+                    return log.info("Ордер не исполнился (IOC) — позиция не открыта")
+                qty = order["filled"]
             self.state["entry"] = order.get("average") or price
             self.state["qty"] = qty
         notify(f"BUY {qty} {self.base} @ {price:.2f}")
@@ -120,7 +124,11 @@ class Bot:
             self.state["cash"] += qty * price * (1 - self.p.fee)
             self.state["qty"] = 0.0
         else:
-            self.ex.create_market_sell_order(config.SYMBOL, qty)
+            order = self.ex.create_market_sell_order(config.SYMBOL, qty) or {}
+            if order.get("fill_checked") and order["filled"] < qty * 0.999:
+                self.state["qty"] = max(0.0, self.state["qty"] - order["filled"])
+                return notify(f"Продажа исполнена на {order['filled']} из {qty} {self.base} "
+                              "(IOC) — остаток будет продан на следующем шаге")
             self.state["qty"] = 0.0
         pnl = (price / self.state["entry"] - 1) * 100
         notify(f"SELL {qty} {self.base} @ {price:.2f} ({reason}, {pnl:+.2f}%)")

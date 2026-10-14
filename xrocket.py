@@ -6,6 +6,9 @@
 НЕ подтверждено (проверить при первом запуске): порядок сортировки, точность количества. Ордеры пока не реализованы.
 """
 import time
+import uuid
+from collections import defaultdict
+from decimal import ROUND_DOWN, Decimal
 from datetime import datetime, timedelta, timezone
 
 import ccxt
@@ -95,15 +98,114 @@ class XRocketPublic:
         return {"last": rows[-1][4]}
 
     # --- служебное ---
-    def _get(self, path, params):
+    def _request(self, method, path, params=None, body=None):
         try:
-            r = self.http.get(self.base + path, params=params, timeout=15)
+            r = self.http.request(method, self.base + path, params=params, json=body, timeout=15)
         except requests.RequestException as e:
             raise ccxt.NetworkError(f"xrocket {path}: {e}") from e
+        if r.status_code in (401, 403):
+            raise ccxt.AuthenticationError(f"xrocket {r.status_code}: проверьте Bearer-токен")
         if r.status_code >= 500:
             raise ccxt.ExchangeNotAvailable(f"xrocket {r.status_code}")
         if r.status_code == 400 and "too_big_interval" in r.text:
             raise IntervalTooBig(f"xrocket 400: {r.text[:200]}")
-        if r.status_code != 200:
-            raise ccxt.ExchangeError(f"xrocket {r.status_code}: {r.text[:200]}")
+        if r.status_code not in (200, 201):
+            raise ccxt.ExchangeError(f"xrocket {r.status_code}: {r.text[:300]}")
         return r.json()
+
+    def _get(self, path, params=None):
+        return self._request("GET", path, params=params)
+
+
+def _step(value: float, step: str) -> str:
+    """Округляет вниз до кратного step (строка, как требует API)."""
+    s = Decimal(step)
+    q = (Decimal(str(value)) / s).to_integral_value(rounding=ROUND_DOWN) * s
+    return f"{q.quantize(Decimal(1).scaleb(s.as_tuple().exponent)):f}"
+
+
+class XRocketExchange(XRocketPublic):
+    """Спот на xRocket Exchange API (приватные методы, Bearer-токен).
+
+    Подтверждено документацией: POST /api/v1/orders (limit: symbol, side, clientOrderId,
+    type, size [базовая монета], price, timeInForce), GET /api/v1/accounts/trading/balances,
+    GET /api/v1/symbols/{symbol}, GET /api/v1/orders/history.
+    «Рыночный» ордер = лимитный IOC с ценой с запасом GUARD от рынка.
+    Не подтверждено: путь «Получить ордер» (исполнение проверяем по истории ордеров).
+    """
+    GUARD = 0.005                       # запас цены IOC-ордера, 0.5%
+    TERMINAL = {"completed", "cancelled", "rejected", "expired"}
+
+    def __init__(self, token: str, testnet: bool = False):
+        super().__init__(testnet)
+        self.http.headers["Authorization"] = f"Bearer {token}"
+        self._info_cache = {}
+
+    @staticmethod
+    def _sym(symbol):
+        return symbol.split(":")[0].replace("/", "-")
+
+    def _info(self, symbol):
+        sym = self._sym(symbol)
+        if sym not in self._info_cache:
+            d = self._get(f"/api/v1/symbols/{sym}")
+            if "symbols" in d:                      # на случай ответа-списка
+                d = d["symbols"][0]
+            self._info_cache[sym] = d
+        return self._info_cache[sym]
+
+    def market(self, symbol):
+        i = self._info(symbol)
+        return {"limits": {"amount": {"min": float(i["baseMinSize"])},
+                           "cost": {"min": float(i["quoteMinSize"])}},
+                "maker": None, "taker": None, "info": i}
+
+    def amount_to_precision(self, symbol, amount):
+        return _step(amount, self._info(symbol)["baseIncrement"])
+
+    def price_to_precision(self, symbol, price):
+        return _step(price, self._info(symbol)["priceIncrement"])
+
+    def fetch_balance(self):
+        """Торговый баланс (не основной!): {asset: {free, total, used}}."""
+        out = defaultdict(lambda: {"free": 0.0, "total": 0.0, "used": 0.0})
+        for b in self._get("/api/v1/accounts/trading/balances")["balances"]:
+            out[b["asset"]] = {"free": float(b["available"]), "total": float(b["balance"]),
+                               "used": float(b["holds"])}
+        return out
+
+    def create_order(self, symbol, type, side, amount, price=None, params=None):
+        if type != "market":
+            raise ccxt.NotSupported("xrocket: поддерживаются только рыночные (IOC) ордера")
+        ref = price or self.fetch_ticker(symbol)["last"]
+        limit = ref * (1 + self.GUARD) if side == "buy" else ref * (1 - self.GUARD)
+        cid = uuid.uuid4().hex
+        order = self._request("POST", "/api/v1/orders", body={
+            "symbol": self._sym(symbol), "side": side, "clientOrderId": cid, "type": "limit",
+            "size": self.amount_to_precision(symbol, float(amount)),
+            "price": self.price_to_precision(symbol, limit), "timeInForce": "IOC"})
+        fill = self._await_fill(symbol, cid, order)
+        res = {"id": order.get("id"), "clientOrderId": cid, "info": order,
+               "filled": None, "average": None, "fill_checked": False}
+        if fill:
+            size, funds = float(fill.get("dealSize") or 0), float(fill.get("dealFunds") or 0)
+            res.update(filled=size, average=funds / size if size else None, fill_checked=True)
+        return res
+
+    def create_market_sell_order(self, symbol, amount):
+        return self.create_order(symbol, "market", "sell", amount, self.fetch_ticker(symbol)["last"])
+
+    def _await_fill(self, symbol, cid, order):
+        """Итог IOC-ордера: сразу из ответа или по истории ордеров (до ~8 секунд)."""
+        for attempt in range(9):
+            if order.get("status") in self.TERMINAL and "dealSize" in order:
+                return order
+            if attempt:
+                time.sleep(1.0)
+            now = self.milliseconds()
+            hist = self._get("/api/v1/orders/history", {
+                "symbol": self._sym(symbol), "startAt": _iso(now - 10 * 60 * 1000),
+                "endAt": _iso(now + 60 * 1000), "currentPage": 1, "pageSize": 20,
+                "hideCanceled": "false"})
+            order = next((o for o in hist.get("orders", []) if o.get("clientOrderId") == cid), order)
+        return order if order.get("status") in self.TERMINAL else None
