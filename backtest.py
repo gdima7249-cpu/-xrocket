@@ -110,6 +110,37 @@ def run_futures(df: pd.DataFrame, p: Params, balance: float = config.START_BALAN
     return final, trades, pd.Series(curve)
 
 
+def run_signals(df: pd.DataFrame, p: Params, entries, exits, balance: float = config.START_BALANCE):
+    """Спот, только покупка: сигналы entries/exits (булевы ряды) по цене закрытия,
+    стоп/тейк внутри свечи (стоп приоритетнее), комиссии и проскальзывание как в run()."""
+    hi, lo, cl = df.high.values, df.low.values, df.close.values
+    en, ex_ = entries.values, exits.values
+    cash, qty, entry = balance, 0.0, 0.0
+    trades, curve = [], []
+    for i in range(len(df)):
+        if qty > 0:
+            stop, take = entry * (1 - p.stop_loss_pct), entry * (1 + p.take_profit_pct)
+            exit_price = stop if lo[i] <= stop else take if hi[i] >= take else None
+            if exit_price:
+                exit_price *= 1 - p.slippage
+                cash += qty * exit_price * (1 - p.fee)
+                trades.append(cash_pnl(entry, exit_price, qty, p))
+                qty = 0.0
+        if qty > 0 and ex_[i]:
+            price = cl[i] * (1 - p.slippage)
+            cash += qty * price * (1 - p.fee)
+            trades.append(cash_pnl(entry, price, qty, p))
+            qty = 0.0
+        elif qty == 0 and en[i]:
+            price = cl[i] * (1 + p.slippage)
+            q = min(position_size(cash, price, p), cash / (price * (1 + p.fee)))
+            if q > 0:
+                cash -= q * price * (1 + p.fee)
+                qty, entry = q, price
+        curve.append(cash + qty * cl[i])
+    return cash + qty * cl[-1], trades, pd.Series(curve)
+
+
 def cash_pnl(entry, exit_, qty, p):
     return qty * (exit_ * (1 - p.fee) - entry * (1 + p.fee))
 

@@ -23,10 +23,10 @@ def fetch_history(exchange, symbol: str, timeframe: str, days: int) -> pd.DataFr
     return df.reset_index(drop=True)
 
 
-def synthetic(n: int = 5000, seed: int = 1) -> pd.DataFrame:
+def synthetic(n: int = 5000, seed: int = 1, drift: float = 0.0002) -> pd.DataFrame:
     """Случайные данные для проверки кода без интернета (НЕ для оценки стратегии)."""
     rng = np.random.default_rng(seed)
-    ret = rng.normal(0.0002, 0.01, n)
+    ret = rng.normal(drift, 0.01, n)
     close = 30000 * np.exp(np.cumsum(ret))
     open_ = np.r_[close[0], close[:-1]]
     high = np.maximum(open_, close) * (1 + rng.uniform(0, 0.004, n))
