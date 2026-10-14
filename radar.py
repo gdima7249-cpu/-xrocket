@@ -227,6 +227,10 @@ def kill_switch(r, prices):
 def run(once=False, execute=False):
     r = Radar(execute)
     last = {"1h": None, "4h": None}
+    last_beat = time.time()
+    if not once:
+        print("Радар запущен и работает. Подробный отчёт — раз в час (в начале каждого часа), "
+              "строка «работает» — каждые 10 минут. Остановка: Ctrl+C.")
     while True:
         try:
             prices = r.prices = r.ex.fetch_tickers()
@@ -245,6 +249,11 @@ def run(once=False, execute=False):
                 r.report(found, r.arbitrage(prices))
             else:
                 r.arbitrage(prices)
+            if not once and time.time() - last_beat >= 600:
+                last_beat = time.time()
+                nxt = (int(time.time() // 3600) + 1) * 3600
+                print(f"[{datetime.now():%H:%M}] радар работает: открытых виртуальных позиций {len(r.s['open'])}, "
+                      f"закрытых сделок {len(r.s['closed'])}; следующий отчёт в {datetime.fromtimestamp(nxt):%H:%M}")
             r.save()
         except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
             print("Сеть/биржа:", e)
