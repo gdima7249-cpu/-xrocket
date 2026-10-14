@@ -25,6 +25,15 @@ MODE = os.getenv("MODE", "paper")
 STRATEGY = os.getenv("STRATEGY", "ema_rsi")    # ema_rsi | donchian (только спот)
 DONCHIAN_IN = int(os.getenv("DONCHIAN_IN", "40"))    # вход: закрытие выше максимума за N свечей
 DONCHIAN_OUT = int(os.getenv("DONCHIAN_OUT", "20"))  # выход: закрытие ниже минимума за M свечей
+# Сканер просадок (scanner_bot.py): покупка резкого падения, продажа на отскоке
+SCAN_DROP = float(os.getenv("SCAN_DROP", "0.06"))           # падение от максимума за LOOKBACK свечей, 0.06 = 6%
+SCAN_LOOKBACK = int(os.getenv("SCAN_LOOKBACK", "24"))       # окно в свечах (1h) -> 24 часа
+SCAN_CONFIRM = os.getenv("SCAN_CONFIRM", "1") == "1"        # покупать только после зелёной свечи (отскок начался)
+SCAN_TAKE = float(os.getenv("SCAN_TAKE", "0.05"))           # тейк-профит
+SCAN_STOP = float(os.getenv("SCAN_STOP", "0.05"))           # стоп-лосс
+SCAN_MAX_HOLD_H = int(os.getenv("SCAN_MAX_HOLD_H", "48"))   # выйти по таймауту, часов
+SCAN_MAX_POSITIONS = int(os.getenv("SCAN_MAX_POSITIONS", "5"))
+SCAN_POSITION_PCT = float(os.getenv("SCAN_POSITION_PCT", "0.15"))  # доля капитала на позицию
 MARKET = os.getenv("MARKET", "spot")          # spot (только покупки) | futures (long и short)
 LEVERAGE = float(os.getenv("LEVERAGE", "2"))   # плечо для futures, от 1 до 5
 EXCHANGE = os.getenv("EXCHANGE", "xrocket")

@@ -105,6 +105,11 @@ class XRocketPublic:
             raise ccxt.ExchangeError(f"xRocket: нет цены для {symbol}")
         return {"last": rows[-1][4]}
 
+    def fetch_tickers(self):
+        """Последние цены всех пар одним запросом: {'BTC-USDT': 83000.0, ...}."""
+        return {t["symbol"]: float(t["last"]) for t in self._get("/api/v1/ticker/24h").get("tickers", [])
+                if t.get("last") is not None}
+
     def list_symbols(self):
         """Все торговые пары биржи (публичный GET /api/v1/symbols)."""
         return self._get("/api/v1/symbols").get("symbols", [])

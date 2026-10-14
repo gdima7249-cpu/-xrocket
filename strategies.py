@@ -48,6 +48,16 @@ def bollinger(df, n, k):
     return (df.close < ma - k * sd) & v, (df.close > ma) & v
 
 
+def dip(df, lookback, drop, confirm=True):
+    """Вход после резкой просадки: цена ниже максимума закрытий за lookback свечей на drop (и, если confirm,
+    свеча зелёная: close > open, то есть отскок уже начался)."""
+    peak = df.close.rolling(lookback).max()
+    cond = (df.close / peak - 1) <= -drop
+    if confirm:
+        cond &= df.close > df.open
+    return cond & _valid(df, lookback)
+
+
 STOP_TAKE = [(0.03, 0.06), (0.05, 0.10)]
 
 # (имя, функция, список параметров) — сетка небольшая намеренно: меньше подгонки
