@@ -1,4 +1,4 @@
-"""Перебор таймфреймов и параметров на истории: python optimize.py --days 30 [--synthetic]
+"""Перебор таймфреймов и параметров на истории: python optimize.py --days 180 --timeframes 1h,4h [--synthetic]
 
 Данные делятся на обучающую (70%) и проверочную (30%) части: параметры
 выбираются по обучающей, а честная оценка — по проверочной. Если результат
@@ -13,7 +13,6 @@ from config import Params
 from data import fetch_history, synthetic
 from exchanges import make_exchange
 
-TIMEFRAMES = ["5m", "15m", "1h"]
 EMA_PAIRS = [(5, 20), (10, 30), (20, 50)]
 STOP_TAKE = [(0.01, 0.02), (0.02, 0.04), (0.03, 0.06)]
 
@@ -30,6 +29,7 @@ def stats(df, p, runner=run):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=30)
+    ap.add_argument("--timeframes", default="15m,1h,4h", help="через запятую: 5m,15m,1h,4h,1d")
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--market", default=config.MARKET, choices=["spot", "futures"])
     a = ap.parse_args()
@@ -37,7 +37,7 @@ if __name__ == "__main__":
 
     runner = run_futures if a.market == "futures" else run
     rows = []
-    for tf in TIMEFRAMES:
+    for tf in a.timeframes.split(","):
         df = synthetic(3000) if a.synthetic else fetch_history(ex, config.SYMBOL, tf, a.days)
         cut = int(len(df) * 0.7)
         train, test = df.iloc[:cut].reset_index(drop=True), df.iloc[cut:].reset_index(drop=True)
