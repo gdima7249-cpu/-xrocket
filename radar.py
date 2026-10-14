@@ -26,7 +26,8 @@ from exchanges import make_exchange
 from strategies import bollinger, dip, donchian, ema_rsi, trend_pullback
 
 STATE_FILE = "radar_state.json"
-MAX_PAIRS = int(os.getenv("RADAR_MAX_PAIRS", "40"))
+MAX_PAIRS = int(os.getenv("RADAR_MAX_PAIRS", "300"))
+QUOTES = os.getenv("RADAR_QUOTES", "ALL").upper()      # ALL (все пары) или список через запятую: USDT,TON
 POS_PCT = float(os.getenv("RADAR_POSITION_PCT", "0.05"))      # доля капитала на позицию (режим --execute)
 MAX_POS = int(os.getenv("RADAR_MAX_POSITIONS", "10"))          # одновременно открытых позиций (режим --execute)
 
@@ -94,8 +95,16 @@ class Radar:
         else:
             self.ex = make_exchange("xrocket", "paper")
         self.state_file = "radar_exec_state.json" if execute else STATE_FILE
-        self.universe = [s["symbol"] for s in self.ex.list_symbols()
-                         if s["symbol"].endswith("-USDT") and s.get("enableTrading", True)][:MAX_PAIRS]
+        want = None if QUOTES == "ALL" else QUOTES.split(",")
+        if execute:
+            want = ["USDT"]        # исполнение ордерами считается в USDT
+        syms = [s["symbol"] for s in self.ex.list_symbols() if s.get("enableTrading", True)
+                and (want is None or s["symbol"].rsplit("-", 1)[-1] in want)]
+        self.universe = syms[:MAX_PAIRS]
+        self.by_quote = {}
+        for s in self.universe:
+            q = s.rsplit("-", 1)[-1]
+            self.by_quote[q] = self.by_quote.get(q, 0) + 1
         self.s = json.load(open(self.state_file)) if os.path.exists(self.state_file) else {
             "open": {}, "closed": [], "arb": {"checks": 0, "positive": 0, "best": None}}
         if execute and "start_equity" not in self.s:
@@ -198,24 +207,29 @@ class Radar:
 
     # ---------- арбитраж ----------
     def arbitrage(self, prices):
-        """Лучший цикл USDT -> A -> B -> USDT по последним ценам: (брутто %, нетто %, описание)."""
+        """Лучший треугольный цикл A -> B -> C -> A по ВСЕМ парам (по последним ценам):
+        (брутто %, нетто %, описание). Оптимистичная оценка: без стакана и глубины."""
+        rate = {}
+        for sym, p in prices.items():
+            if "-" not in sym or p <= 0:
+                continue
+            base, quote = sym.rsplit("-", 1)
+            rate[(base, quote)] = p            # продаём 1 base -> получаем p quote
+            rate[(quote, base)] = 1 / p        # покупаем base за quote
+        assets = {a for a, _ in rate} | {b for _, b in rate}
+        fee3 = (1 - self.p.fee) ** 3
         best = None
-        fee = (1 - self.p.fee) ** 3
-        bases = [s[:-5] for s in prices if s.endswith("-USDT")]
-        for a in bases:
-            for b in bases:
-                if a == b:
+        for a in assets:
+            for b in assets:
+                if a == b or (a, b) not in rate:
                     continue
-                if f"{a}-{b}" in prices:            # 1 A = p B  -> продаём A за B
-                    rate, via = prices[f"{a}-{b}"], f"{a}-{b}"
-                elif f"{b}-{a}" in prices:          # 1 B = p A  -> покупаем B за A
-                    rate, via = 1 / prices[f"{b}-{a}"], f"{b}-{a}"
-                else:
-                    continue
-                gross = (1 / prices[f"{a}-USDT"]) * rate * prices[f"{b}-USDT"]
-                cand = ((gross - 1) * 100, (gross * fee - 1) * 100, f"USDT→{a}→{b}→USDT (через {via})")
-                if best is None or cand[0] > best[0]:
-                    best = cand
+                for c in assets:
+                    if c in (a, b) or (b, c) not in rate or (c, a) not in rate:
+                        continue
+                    gross = rate[(a, b)] * rate[(b, c)] * rate[(c, a)]
+                    cand = ((gross - 1) * 100, (gross * fee3 - 1) * 100, f"{a}→{b}→{c}→{a}")
+                    if best is None or cand[0] > best[0]:
+                        best = cand
         if best:
             self.s["arb"]["checks"] += 1
             self.s["arb"]["positive"] += best[1] > 0
@@ -224,7 +238,7 @@ class Radar:
 
     # ---------- отчёт ----------
     def report(self, found, arb):
-        print(f"\n{'=' * 78}\nРАДАР {datetime.now():%Y-%m-%d %H:%M}   (пар: {len(self.universe)}; "
+        print(f"\n{'=' * 78}\nРАДАР {datetime.now():%Y-%m-%d %H:%M}   (пар: {len(self.universe)} [{', '.join(f'{q}: {n}' for q, n in self.by_quote.items())}]; "
               f"комиссия {self.p.fee*100:.2f}%/сторона, проскальзывание {self.p.slippage*100:.2f}%)")
         print("Сигналы входа сейчас:" if found else "Сигналов входа сейчас нет.")
         for st, sym, price in found:
@@ -235,7 +249,7 @@ class Radar:
             a = self.s["arb"]
             print(f"  за всё время: проверок {a['checks']}, с плюсом после комиссий: {a['positive']}")
         else:
-            print("Арбитраж: нет подходящих связок пар.")
+            print("Арбитраж: нет треугольных связок (нужны пары между монетами, например A-B, B-C и C-A).")
         if self.execute:
             eq, st0 = self.equity(self.prices), self.s["start_equity"]
             print(f"РЕАЛЬНЫЙ баланс testnet: капитал {eq:.2f} USDT (старт {st0:.2f}, изменение {(eq / st0 - 1) * 100:+.2f}%)")
