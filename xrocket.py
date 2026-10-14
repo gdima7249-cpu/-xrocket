@@ -91,10 +91,18 @@ class XRocketPublic:
         return [rows[k] for k in sorted(rows)]
 
     def fetch_ticker(self, symbol):
-        # Схема тикера не подтверждена -> берём close последней минутной свечи
+        """Последняя цена: официальный GET /api/v1/ticker/24h -> tickers[].last
+        (так делает пример из руководства xRocket); при сбое — close минутной свечи."""
+        sym = symbol.split(":")[0].replace("/", "-")
+        try:
+            for t in self._get("/api/v1/ticker/24h").get("tickers", []):
+                if t.get("symbol") == sym and t.get("last") is not None:
+                    return {"last": float(t["last"])}
+        except (ccxt.ExchangeError, KeyError, ValueError, TypeError):
+            pass
         rows = self.fetch_ohlcv(symbol, "1m", limit=10)
         if not rows:
-            raise ccxt.ExchangeError(f"xRocket: нет свечей для {symbol}")
+            raise ccxt.ExchangeError(f"xRocket: нет цены для {symbol}")
         return {"last": rows[-1][4]}
 
     # --- служебное ---
@@ -127,13 +135,12 @@ def _step(value: float, step: str) -> str:
 class XRocketExchange(XRocketPublic):
     """Спот на xRocket Exchange API (приватные методы, Bearer-токен).
 
-    Подтверждено документацией: POST /api/v1/orders (limit: symbol, side, clientOrderId,
-    type, size [базовая монета], price, timeInForce), GET /api/v1/accounts/trading/balances,
+    Подтверждено документацией: POST /api/v1/orders (market: symbol, side,
+    type, size [базовая монета], timeInForce=IOC), GET /api/v1/accounts/trading/balances,
     GET /api/v1/symbols/{symbol}, GET /api/v1/orders/history.
-    «Рыночный» ордер = лимитный IOC с ценой с запасом GUARD от рынка.
+    Ордер: POST /api/v1/orders, type=market, size (базовая монета), timeInForce=IOC — как в руководстве.
     Не подтверждено: путь «Получить ордер» (исполнение проверяем по истории ордеров).
     """
-    GUARD = 0.005                       # запас цены IOC-ордера, 0.5%
     TERMINAL = {"completed", "cancelled", "rejected", "expired"}
 
     def __init__(self, token: str, testnet: bool = False):
@@ -175,28 +182,25 @@ class XRocketExchange(XRocketPublic):
         return out
 
     def create_order(self, symbol, type, side, amount, price=None, params=None):
+        """Рыночный ордер, как в руководстве xRocket: type=market, size в базовой монете, IOC."""
         if type != "market":
-            raise ccxt.NotSupported("xrocket: поддерживаются только рыночные (IOC) ордера")
-        ref = price or self.fetch_ticker(symbol)["last"]
-        limit = ref * (1 + self.GUARD) if side == "buy" else ref * (1 - self.GUARD)
-        cid = uuid.uuid4().hex
+            raise ccxt.NotSupported("xrocket: поддерживаются только рыночные ордера")
         order = self._request("POST", "/api/v1/orders", body={
-            "symbol": self._sym(symbol), "side": side, "clientOrderId": cid, "type": "limit",
-            "size": self.amount_to_precision(symbol, float(amount)),
-            "price": self.price_to_precision(symbol, limit), "timeInForce": "IOC"})
-        fill = self._await_fill(symbol, cid, order)
-        res = {"id": order.get("id"), "clientOrderId": cid, "info": order,
-               "filled": None, "average": None, "fill_checked": False}
+            "symbol": self._sym(symbol), "side": side, "type": "market",
+            "size": self.amount_to_precision(symbol, float(amount)), "timeInForce": "IOC"})
+        fill = self._await_fill(symbol, order)
+        res = {"id": order.get("id"), "info": order, "filled": None, "average": None,
+               "fill_checked": False}
         if fill:
             size, funds = float(fill.get("dealSize") or 0), float(fill.get("dealFunds") or 0)
             res.update(filled=size, average=funds / size if size else None, fill_checked=True)
         return res
 
     def create_market_sell_order(self, symbol, amount):
-        return self.create_order(symbol, "market", "sell", amount, self.fetch_ticker(symbol)["last"])
+        return self.create_order(symbol, "market", "sell", amount)
 
-    def _await_fill(self, symbol, cid, order):
-        """Итог IOC-ордера: сразу из ответа или по истории ордеров (до ~8 секунд)."""
+    def _await_fill(self, symbol, order):
+        """Итог ордера: сразу из ответа или по истории ордеров (до ~8 секунд), поиск по id."""
         for attempt in range(9):
             if order.get("status") in self.TERMINAL and "dealSize" in order:
                 return order
@@ -207,5 +211,5 @@ class XRocketExchange(XRocketPublic):
                 "symbol": self._sym(symbol), "startAt": _iso(now - 10 * 60 * 1000),
                 "endAt": _iso(now + 60 * 1000), "currentPage": 1, "pageSize": 20,
                 "hideCanceled": "false"})
-            order = next((o for o in hist.get("orders", []) if o.get("clientOrderId") == cid), order)
+            order = next((o for o in hist.get("orders", []) if o.get("id") == order.get("id")), order)
         return order if order.get("status") in self.TERMINAL else None
