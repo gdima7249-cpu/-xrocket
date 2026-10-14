@@ -3,6 +3,7 @@
 
     python radar.py --once     # один проход: что видно сейчас, и выход
     python radar.py            # постоянная работа: виртуальный журнал сделок + отчёт раз в час
+    python radar.py --stats    # статистика по сделкам и по дням из сохранённого файла (запущенный радар не мешает)
     python radar.py --execute  # то же, но сигналы исполняются НАСТОЯЩИМИ ордерами на testnet (MODE=testnet, нужен токен)
 
 Виртуальный журнал: каждый сигнал входа открывает ВИРТУАЛЬНУЮ сделку (с комиссией и проскальзыванием из .env),
@@ -39,6 +40,48 @@ STRATS = {
     "trend_pullback": dict(tf="1h", fn=lambda d: trend_pullback(d, 200, 30), tp=0.06, sl=0.03, hold=24 * 7),
     "bollinger":      dict(tf="1h", fn=lambda d: bollinger(d, 20, 2.0), tp=0.05, sl=0.05, hold=48),
 }
+
+
+def stats_text(s):
+    """Статистика журнала: по сделкам и по ДНЯМ входа (в один день сигналы идут пачками — это одна ставка на рынок)."""
+    lines = [f"Журнал (открыто {len(s['open'])}, закрыто {len(s['closed'])}):",
+             f"  {'стратегия':<15}{'сделок':>7}{'win%':>6}{'ср.% на сделку':>16}{'итого %':>9}"]
+    for st in STRATS:
+        r = [c["ret"] * 100 for c in s["closed"] if c["s"] == st]
+        if r:
+            note = "  (мало данных, <30)" if len(r) < 30 else ""
+            lines.append(f"  {st:<15}{len(r):>7}{sum(x > 0 for x in r) / len(r) * 100:>6.0f}"
+                         f"{sum(r) / len(r):>16.2f}{sum(r):>9.1f}{note}")
+        else:
+            lines.append(f"  {st:<15}{0:>7}{'-':>6}{'-':>16}{'-':>9}")
+
+    def day(c):
+        return datetime.fromtimestamp(c.get("t0", c["t"])).strftime("%Y-%m-%d")
+
+    lines += ["", "По дням входа (день = один «эпизод»: среднее по всем сделкам этого дня):",
+              f"  {'стратегия':<15}{'дней':>5}{'плюс-дней':>10}{'ср.% за день':>14}{'худший':>8}{'лучший':>8}"]
+    for st in STRATS:
+        days = {}
+        for c in s["closed"]:
+            if c["s"] == st:
+                days.setdefault(day(c), []).append(c["ret"] * 100)
+        if days:
+            m = [sum(v) / len(v) for v in days.values()]
+            note = "  (мало дней, <20)" if len(m) < 20 else ""
+            lines.append(f"  {st:<15}{len(m):>5}{sum(v > 0 for v in m):>10}{sum(m) / len(m):>14.2f}"
+                         f"{min(m):>8.2f}{max(m):>8.2f}{note}")
+        else:
+            lines.append(f"  {st:<15}{0:>5}{'-':>10}{'-':>14}{'-':>8}{'-':>8}")
+
+    recent = {}
+    for c in s["closed"]:
+        recent.setdefault(day(c), []).append(c["ret"] * 100)
+    if recent:
+        lines += ["", "Последние дни, все стратегии вместе:", f"  {'день':<12}{'сделок':>7}{'плюс':>6}{'ср.%':>8}"]
+        for d in sorted(recent)[-7:]:
+            v = recent[d]
+            lines.append(f"  {d:<12}{len(v):>7}{sum(x > 0 for x in v):>6}{sum(v) / len(v):>8.2f}")
+    return "\n".join(lines)
 
 
 class Radar:
@@ -103,7 +146,7 @@ class Radar:
             exit_price = o.get("average") or exit_price
         del self.s["open"][key]
         ret = exit_price * (1 - self.p.fee) / (v["entry"] * (1 + self.p.fee)) - 1
-        self.s["closed"].append({"s": st, "sym": sym, "ret": ret, "reason": reason, "t": time.time()})
+        self.s["closed"].append({"s": st, "sym": sym, "ret": ret, "reason": reason, "t": time.time(), "t0": v["t"]})
         return ret
 
     def manage(self, prices):
@@ -196,16 +239,7 @@ class Radar:
         if self.execute:
             eq, st0 = self.equity(self.prices), self.s["start_equity"]
             print(f"РЕАЛЬНЫЙ баланс testnet: капитал {eq:.2f} USDT (старт {st0:.2f}, изменение {(eq / st0 - 1) * 100:+.2f}%)")
-        print(f"Журнал {'сделок testnet' if self.execute else 'виртуальных сделок'} (открыто {len(self.s['open'])}):")
-        print(f"  {'стратегия':<15}{'сделок':>7}{'win%':>6}{'ср.% на сделку':>16}{'итого %':>9}")
-        for st in STRATS:
-            r = [c["ret"] * 100 for c in self.s["closed"] if c["s"] == st]
-            if r:
-                note = "  (мало данных, <30)" if len(r) < 30 else ""
-                print(f"  {st:<15}{len(r):>7}{sum(x > 0 for x in r) / len(r) * 100:>6.0f}"
-                      f"{sum(r) / len(r):>16.2f}{sum(r):>9.1f}{note}")
-            else:
-                print(f"  {st:<15}{0:>7}{'-':>6}{'-':>16}{'-':>9}")
+        print(stats_text(self.s))
         print("Не торговать, пока по стратегии нет сотен сделок и стабильного плюса после издержек.")
 
 
@@ -266,5 +300,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--execute", action="store_true", help="исполнять сигналы ордерами на testnet (MODE=testnet)")
+    ap.add_argument("--stats", action="store_true", help="показать статистику из файла состояния и выйти (без сети)")
     a = ap.parse_args()
-    run(a.once, a.execute)
+    if a.stats:
+        f = "radar_exec_state.json" if a.execute else STATE_FILE
+        if not os.path.exists(f):
+            raise SystemExit(f"Файла {f} ещё нет: сначала запустите радар.")
+        print(stats_text(json.load(open(f))))
+    else:
+        run(a.once, a.execute)
