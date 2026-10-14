@@ -3,6 +3,7 @@
 
     python radar.py --once     # один проход: что видно сейчас, и выход
     python radar.py            # постоянная работа: виртуальный журнал сделок + отчёт раз в час
+    python radar.py --execute  # то же, но сигналы исполняются НАСТОЯЩИМИ ордерами на testnet (MODE=testnet, нужен токен)
 
 Виртуальный журнал: каждый сигнал входа открывает ВИРТУАЛЬНУЮ сделку (с комиссией и проскальзыванием из .env),
 закрывается по тейку/стопу/таймауту/сигналу. За недели накапливается честная статистика по каждой стратегии «вперёд».
@@ -25,6 +26,8 @@ from strategies import bollinger, dip, donchian, ema_rsi, trend_pullback
 
 STATE_FILE = "radar_state.json"
 MAX_PAIRS = int(os.getenv("RADAR_MAX_PAIRS", "40"))
+POS_PCT = float(os.getenv("RADAR_POSITION_PCT", "0.05"))      # доля капитала на позицию (режим --execute)
+MAX_POS = int(os.getenv("RADAR_MAX_POSITIONS", "10"))          # одновременно открытых позиций (режим --execute)
 
 # имя: таймфрейм, функция (df -> entries, exits), тейк, стоп, таймаут (часов)
 STRATS = {
@@ -39,25 +42,67 @@ STRATS = {
 
 
 class Radar:
-    def __init__(self):
-        self.p = Params()
-        self.ex = make_exchange("xrocket", "paper")
+    def __init__(self, execute=False):
+        self.p, self.execute = Params(), execute
+        if execute:
+            if config.MODE != "testnet":
+                raise SystemExit("--execute работает только при MODE=testnet (тестовые деньги). Сейчас: " + config.MODE)
+            self.ex = make_exchange("xrocket", "testnet", config.API_KEY, config.API_SECRET)
+        else:
+            self.ex = make_exchange("xrocket", "paper")
+        self.state_file = "radar_exec_state.json" if execute else STATE_FILE
         self.universe = [s["symbol"] for s in self.ex.list_symbols()
                          if s["symbol"].endswith("-USDT") and s.get("enableTrading", True)][:MAX_PAIRS]
-        self.s = json.load(open(STATE_FILE)) if os.path.exists(STATE_FILE) else {
+        self.s = json.load(open(self.state_file)) if os.path.exists(self.state_file) else {
             "open": {}, "closed": [], "arb": {"checks": 0, "positive": 0, "best": None}}
+        if execute and "start_equity" not in self.s:
+            self.s["start_equity"] = self.equity(self.ex.fetch_tickers())
 
     def save(self):
-        json.dump(self.s, open(STATE_FILE, "w"))
+        json.dump(self.s, open(self.state_file, "w"))
+
+    def equity(self, prices):
+        """Режим --execute: капитал = USDT на торговом балансе + стоимость открытых позиций."""
+        total = float(self.ex.fetch_balance()["USDT"]["total"])
+        return total + sum(v.get("qty", 0) * prices.get(k.split("|")[1], v["entry"]) for k, v in self.s["open"].items())
 
     # ---------- виртуальные сделки ----------
     def open_trade(self, st, sym, price):
-        self.s["open"][f"{st}|{sym}"] = {"entry": price * (1 + self.p.slippage), "t": time.time()}
+        """Открывает (виртуальную или настоящую на testnet) сделку. True — если открыта."""
+        key = f"{st}|{sym}"
+        if not self.execute:
+            self.s["open"][key] = {"entry": price * (1 + self.p.slippage), "t": time.time()}
+            return True
+        if len(self.s["open"]) >= MAX_POS:
+            return False
+        free = float(self.ex.fetch_balance()["USDT"]["free"])
+        value = min(self.equity(self.prices) * POS_PCT, free * 0.98)
+        lim = self.ex.market(sym)["limits"]
+        qty = float(self.ex.amount_to_precision(sym, value / price))
+        if qty <= 0 or qty * price < ((lim.get("cost") or {}).get("min") or 0) or qty < ((lim.get("amount") or {}).get("min") or 0):
+            return False
+        o = self.ex.create_order(sym, "market", "buy", qty, price)
+        if o.get("fill_checked"):
+            if not o["filled"]:
+                return False
+            qty = o["filled"]
+        self.s["open"][key] = {"entry": o.get("average") or price * (1 + self.p.slippage), "t": time.time(), "qty": qty}
+        return True
 
     def close_trade(self, key, price, reason):
         st, sym = key.split("|")
-        v = self.s["open"].pop(key)
-        ret = price * (1 - self.p.slippage) * (1 - self.p.fee) / (v["entry"] * (1 + self.p.fee)) - 1
+        v = self.s["open"][key]
+        exit_price = price * (1 - self.p.slippage)
+        if self.execute:
+            free = float(self.ex.fetch_balance()[sym.split("-")[0]]["free"])
+            q = float(self.ex.amount_to_precision(sym, min(v["qty"], free)))
+            o = self.ex.create_market_sell_order(sym, q) if q > 0 else {}
+            if o.get("fill_checked") and o["filled"] < q * 0.999:
+                v["qty"] = max(0.0, v["qty"] - o["filled"])
+                return None                              # частично — остаток продадим на следующем шаге
+            exit_price = o.get("average") or exit_price
+        del self.s["open"][key]
+        ret = exit_price * (1 - self.p.fee) / (v["entry"] * (1 + self.p.fee)) - 1
         self.s["closed"].append({"s": st, "sym": sym, "ret": ret, "reason": reason, "t": time.time()})
         return ret
 
@@ -104,8 +149,8 @@ class Radar:
                 if key in self.s["open"] and bool(ex_.iloc[-1]):
                     self.close_trade(key, prices[sym], "signal")
                 elif key not in self.s["open"] and bool(en.iloc[-1]):
-                    self.open_trade(st, sym, prices[sym])
-                    found.append((st, sym, prices[sym]))
+                    if self.open_trade(st, sym, prices[sym]):
+                        found.append((st, sym, prices[sym]))
         return found
 
     # ---------- арбитраж ----------
@@ -148,7 +193,10 @@ class Radar:
             print(f"  за всё время: проверок {a['checks']}, с плюсом после комиссий: {a['positive']}")
         else:
             print("Арбитраж: нет подходящих связок пар.")
-        print(f"Журнал виртуальных сделок (открыто {len(self.s['open'])}):")
+        if self.execute:
+            eq, st0 = self.equity(self.prices), self.s["start_equity"]
+            print(f"РЕАЛЬНЫЙ баланс testnet: капитал {eq:.2f} USDT (старт {st0:.2f}, изменение {(eq / st0 - 1) * 100:+.2f}%)")
+        print(f"Журнал {'сделок testnet' if self.execute else 'виртуальных сделок'} (открыто {len(self.s['open'])}):")
         print(f"  {'стратегия':<15}{'сделок':>7}{'win%':>6}{'ср.% на сделку':>16}{'итого %':>9}")
         for st in STRATS:
             r = [c["ret"] * 100 for c in self.s["closed"] if c["s"] == st]
@@ -161,12 +209,29 @@ class Radar:
         print("Не торговать, пока по стратегии нет сотен сделок и стабильного плюса после издержек.")
 
 
-def run(once=False):
-    r = Radar()
+def kill_switch(r, prices):
+    """Только --execute: при падении капитала на MAX_TOTAL_LOSS_PCT продать всё и остановиться."""
+    if r.s.get("halted"):
+        return True
+    eq, floor = r.equity(prices), r.s["start_equity"] * (1 - config.MAX_TOTAL_LOSS_PCT)
+    if eq > floor:
+        return False
+    for k in list(r.s["open"]):
+        r.close_trade(k, prices.get(k.split("|")[1], r.s["open"][k]["entry"]), "kill-switch")
+    r.s["halted"] = True
+    r.save()
+    print(f"СТОП: капитал {eq:.2f} достиг лимита {floor:.2f}. Радар остановлен (для сброса удалите {r.state_file}).")
+    return True
+
+
+def run(once=False, execute=False):
+    r = Radar(execute)
     last = {"1h": None, "4h": None}
     while True:
         try:
-            prices = r.ex.fetch_tickers()
+            prices = r.prices = r.ex.fetch_tickers()
+            if execute and kill_switch(r, prices):
+                return
             r.manage(prices)
             now = time.time()
             tfs = [tf for tf, sec in (("1h", 3600), ("4h", 14400)) if last[tf] != int(now // sec)]
@@ -191,4 +256,6 @@ def run(once=False):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
-    run(ap.parse_args().once)
+    ap.add_argument("--execute", action="store_true", help="исполнять сигналы ордерами на testnet (MODE=testnet)")
+    a = ap.parse_args()
+    run(a.once, a.execute)
