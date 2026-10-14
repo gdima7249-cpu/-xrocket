@@ -105,6 +105,10 @@ class XRocketPublic:
             raise ccxt.ExchangeError(f"xRocket: нет цены для {symbol}")
         return {"last": rows[-1][4]}
 
+    def list_symbols(self):
+        """Все торговые пары биржи (публичный GET /api/v1/symbols)."""
+        return self._get("/api/v1/symbols").get("symbols", [])
+
     # --- служебное ---
     def _request(self, method, path, params=None, body=None):
         try:
