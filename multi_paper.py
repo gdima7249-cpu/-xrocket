@@ -29,7 +29,8 @@ from radar import STRATS
 STATE_FILE = os.getenv("MULTI_STATE", "multi_state.json")
 EXCHANGES = [e.strip() for e in os.getenv("MULTI_EXCHANGES", "binance,okx,bybit,kucoin,mexc,kraken,coinbase,xrocket").split(",") if e.strip()]
 SYMBOLS = [s.strip() for s in os.getenv(
-    "MULTI_SYMBOLS", "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,DOGE/USDT,ADA/USDT,LINK/USDT").split(",") if s.strip()]
+    "MULTI_SYMBOLS", "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,DOGE/USDT,ADA/USDT,LINK/USDT,"
+    "AVAX/USDT,DOT/USDT,LTC/USDT,TRX/USDT,NEAR/USDT,ATOM/USDT,UNI/USDT,XLM/USDT,APT/USDT,ARB/USDT,OP/USDT,TON/USDT").split(",") if s.strip()]
 START = float(os.getenv("MULTI_START", "1000"))
 POS_PCT = float(os.getenv("MULTI_POSITION_PCT", "0.1"))
 MAX_POS = int(os.getenv("MULTI_MAX_POSITIONS", "8"))
@@ -48,10 +49,13 @@ class Venue:
             self.ex.load_markets()
         # логический символ (BTC/USDT) -> реальный символ биржи (на Coinbase/Kraken может быть BTC/USD или BTC/USDC)
         self.sym_map = {}
+        listed = None
+        if self.modeled:                                    # у xRocket берём только реально существующие пары
+            listed = {s["symbol"].replace("-", "/") for s in self.ex.list_symbols() if s.get("enableTrading", True)}
         for s in SYMBOLS:
             base = s.split("/")[0]
             for cand in (s, f"{base}/USD", f"{base}/USDC"):
-                if self.modeled or cand in self.ex.markets:
+                if (cand in listed) if self.modeled else (cand in self.ex.markets):
                     self.sym_map[s] = cand
                     break
         self.symbols = list(self.sym_map)
