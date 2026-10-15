@@ -27,7 +27,9 @@ STATE_FILE = os.getenv("BINARY_STATE", "binary_state.json")
 EXPIRY = int(float(os.getenv("BINARY_EXPIRY_SEC") or float(os.getenv("BINARY_EXPIRY_MIN", "5")) * 60))  # срок ставки, секунд
 PAYOUT = float(os.getenv("BINARY_PAYOUT", "0.85"))              # выплата при выигрыше (доля от ставки)
 START = float(os.getenv("BINARY_START", "1000"))                # виртуальный баланс каждого предсказателя
-STAKE = START * float(os.getenv("BINARY_STAKE_PCT", "0.01"))    # фиксированная ставка (1% от старта)
+STAKE_PCT = float(os.getenv("BINARY_STAKE_PCT", "0.01"))        # доля баланса на ставку (1%)
+COMPOUND = os.getenv("BINARY_COMPOUND", "1") == "1"             # 1: ставка = % от ТЕКУЩЕГО баланса (как на реальном счёте); 0: фиксированная
+STAKE = START * STAKE_PCT                                       # фиксированная ставка при COMPOUND=0
 EPS = float(os.getenv("BINARY_EPS", "0.0005"))                  # минимальное движение для сигнала (0.05%)
 SAMPLE = int(os.getenv("BINARY_SAMPLE_SEC") or max(2, min(30, EXPIRY // 6)))   # опрос цен, секунд
 BEAT = int(os.getenv("BINARY_BEAT_SEC") or (60 if EXPIRY <= 120 else 600))     # как часто печатать строку «работает»
@@ -39,10 +41,13 @@ BREAKEVEN = 1 / (1 + PAYOUT)
 class Binary:
     def __init__(self):
         self.s = json.load(open(STATE_FILE)) if os.path.exists(STATE_FILE) else {
-            "acc": {p: {"bal": START, "bets": 0, "wins": 0, "ties": 0} for p in PREDICTORS},
-            "open": [], "since": time.time()}
+            "acc": {p: {"bal": START, "bets": 0, "wins": 0, "ties": 0, "turn": 0.0} for p in PREDICTORS},
+            "open": [], "since": time.time(), "hist": []}
         for p in PREDICTORS:                           # на случай добавления предсказателей
             self.s["acc"].setdefault(p, {"bal": START, "bets": 0, "wins": 0, "ties": 0})
+            self.s["acc"][p].setdefault("turn", self.s["acc"][p]["bets"] * STAKE)
+        self.s.setdefault("hist", [])
+        self.last_hist = 0.0
         self.series, self.last_bucket, self.rng = {}, None, random.Random(7)
 
     def save(self):
@@ -81,15 +86,25 @@ class Binary:
             return None if r is None else "up" if r < 30 else "down" if r > 70 else None
 
     # ---------- ставки ----------
+    def open_stake(self, name):
+        a = self.s["acc"][name]
+        return a["bal"] * STAKE_PCT if COMPOUND else STAKE
+
     def open_bets(self, prices, now):
+        exposure = {p: sum(b.get("stake", STAKE) for b in self.s["open"] if b["p"] == p) for p in PREDICTORS}
         for sym, price in prices.items():
             dq = self.series.get(sym)
             if not dq or dq[0][0] > now - WARM:
                 continue                                  # мало истории
             for name in PREDICTORS:
+                stake = self.open_stake(name)
+                a = self.s["acc"][name]
+                if a["bal"] < 1 or exposure[name] + stake > a["bal"] * 0.9:
+                    continue                                # счёт исчерпан или слишком много открытых ставок
                 d = self.predict(name, sym, price, now)
                 if d:
-                    self.s["open"].append({"p": name, "sym": sym, "dir": d, "entry": price, "t": now})
+                    exposure[name] += stake
+                    self.s["open"].append({"p": name, "sym": sym, "dir": d, "entry": price, "t": now, "stake": stake})
 
     def resolve(self, b, price):
         a = self.s["acc"][b["p"]]
@@ -97,9 +112,12 @@ class Binary:
         if price is None or price == b["entry"]:
             a["ties"] += 1
             return
+        stake = b.get("stake", STAKE)
         win = (price > b["entry"]) == (b["dir"] == "up")
         a["wins"] += win
-        a["bal"] += STAKE * PAYOUT if win else -STAKE
+        a["turn"] += stake
+        a["bal"] += stake * PAYOUT if win else -stake
+        a["bal"] = max(a["bal"], 0.0)
 
     def tick(self, prices, now):
         for sym, p in prices.items():
@@ -113,6 +131,10 @@ class Binary:
             else:
                 still.append(b)
         self.s["open"] = still
+        if now - self.last_hist >= 60:
+            self.last_hist = now
+            self.s["hist"].append([now, {p: round(a["bal"], 2) for p, a in self.s["acc"].items()}])
+            del self.s["hist"][:-3000]
         bucket = int(now // EXPIRY)
         if bucket != self.last_bucket:
             self.last_bucket = bucket
@@ -123,12 +145,19 @@ def fmt_expiry():
     return f"{EXPIRY} с" if EXPIRY < 120 else f"{EXPIRY // 60} мин"
 
 
+def bar(ratio, width=30):
+    """Полоска баланса: ratio = баланс / старт (1.0 = столько же, сколько было)."""
+    n = max(0, min(width, int(round(ratio * width / 2))))     # середина полоски = старт
+    return "#" * n + "." * (width - n)
+
+
 def stats_text(s):
     days = (time.time() - s["since"]) / 86400
-    lines = [f"Виртуальные ставки «вверх/вниз» (срок {fmt_expiry()}, выплата {PAYOUT * 100:.0f}%, "
-             f"ставка {STAKE:.0f} из {START:.0f}); работает {days:.1f} дн.",
+    mode = f"{STAKE_PCT * 100:.1f}% текущего баланса" if COMPOUND else f"фикс. {STAKE:.0f}"
+    lines = [f"Виртуальные счета «вверх/вниз» (срок {fmt_expiry()}, выплата {PAYOUT * 100:.0f}%, ставка {mode}, "
+             f"старт {START:.0f} у каждого); работает {days:.2f} дн.",
              f"Порог безубыточности: угадывать больше {BREAKEVEN * 100:.2f}% ставок.",
-             f"  {'предсказатель':<14}{'ставок':>8}{'ничьих':>8}{'винрейт%':>10}{'прибыль':>10}{'на ставку%':>11}  вывод"]
+             f"  {'предсказатель':<14}{'ставок':>8}{'ничьих':>8}{'винрейт%':>10}{'баланс':>10}{'изм.%':>8}{'на ставку%':>11}  вывод"]
     for p in PREDICTORS:
         a = s["acc"][p]
         n = a["bets"] - a["ties"]
@@ -137,10 +166,31 @@ def stats_text(s):
         note = ("мало ставок" if n < 300 else "ЗНАЧИМО выше порога (z>3)" if z > 3
                 else "ниже/около порога" if z < 2 else "возможно выше, нужно больше данных")
         pnl = a["bal"] - START
-        roi = pnl / (n * STAKE) * 100 if n else 0.0          # средний результат на 100% ставки
-        lines.append(f"  {p:<14}{a['bets']:>8}{a['ties']:>8}{wr * 100:>10.2f}{pnl:>+10.1f}{roi:>+11.1f}  {note}")
+        turn = a.get("turn") or (n * STAKE)
+        roi = (a["bal"] - START) / turn * 100 if turn else 0.0     # прибыль на единицу ставок (не зависит от сжатия баланса)
+        lines.append(f"  {p:<14}{a['bets']:>8}{a['ties']:>8}{wr * 100:>10.2f}{a['bal']:>10.1f}"
+                     f"{pnl / START * 100:>+8.1f}{roi:>+11.1f}  {note}")
     lines.append("«На ставку%» — средний результат с каждой ставки (при 50% угадываний и выплате 85% это около -7.5%).")
-    lines.append("Ничья (цена не изменилась) — возврат ставки. random — контроль. ОСТОРОЖНО: в растущем рынке «always_up» выглядит гением — это не умение, а рост рынка.")
+
+    lines += ["", "Баланс на картинке (середина полоски = стартовые 1000):"]
+    for p in PREDICTORS:
+        a = s["acc"][p]
+        lines.append(f"  {p:<14}|{bar(a['bal'] / START)}| {a['bal']:>8.1f}")
+
+    hist = s.get("hist") or []
+    if len(hist) >= 2:
+        t_end = hist[-1][0]
+        marks = [(m, f"{m} мин") for m in (10, 30, 60, 120, 240, 480) if t_end - hist[0][0] >= m * 60]
+        if marks:
+            head = f"  {'через':<10}" + "".join(f"{p:>12}" for p in PREDICTORS)
+            lines += ["", "Как менялся баланс (в начале у каждого 1000):", head, f"  {'старт':<10}" + "".join(f"{START:>12.1f}" for _ in PREDICTORS)]
+            for m, name in marks:
+                row = min(hist, key=lambda h: abs(h[0] - (hist[0][0] + m * 60)))[1]
+                lines.append(f"  {name:<10}" + "".join(f"{row.get(p, 0):>12.1f}" for p in PREDICTORS))
+        lines.append(f"  {'сейчас':<10}" + "".join(f"{hist[-1][1].get(p, 0):>12.1f}" for p in PREDICTORS))
+    lines.append("")
+    lines.append("Ничья (цена не изменилась) — возврат ставки. random — контроль. ОСТОРОЖНО: в растущем рынке «always_up» "
+                 "выглядит гением — это не умение, а рост рынка.")
     return "\n".join(lines)
 
 
