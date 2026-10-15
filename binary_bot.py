@@ -50,7 +50,12 @@ class BinanceSource:
         self.host, self.symbols = None, []
         data = self.get("/api/v3/ticker/24hr")
         bad = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
-        usdt = [t for t in data if t["symbol"].endswith("USDT") and not t["symbol"].endswith(bad)]
+        # стейблкоины и фиатные валюты: цена почти не двигается, ставки по ним — шум
+        flat = {"USDC", "USD1", "FDUSD", "TUSD", "BUSD", "USDP", "DAI", "USDE", "PYUSD", "USDS", "XUSD", "RLUSD",
+                "EUR", "EURI", "AEUR", "GBP", "TRY", "BRL", "ARS", "UAH", "PLN", "RON", "CZK", "JPY", "MXN", "COP",
+                "ZAR", "IDR", "NGN", "RUB", "AUD", "CAD"}
+        usdt = [t for t in data if t["symbol"].endswith("USDT") and not t["symbol"].endswith(bad)
+                and t["symbol"][:-4] not in flat]
         usdt.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
         self.symbols = [t["symbol"] for t in usdt[:BINANCE_TOP]]
         print(f"Binance: источник {self.host}, пар под наблюдением {len(self.symbols)}: "
