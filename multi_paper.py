@@ -5,7 +5,7 @@
 настоящая тейкер-комиссия биржи. xRocket: стакан недоступен -> модель (комиссия 0.3%, проскальзывание 0.25%, измерено на testnet).
 Итог показывает не «работает ли на тесте», а сколько стоит вход/выход на каждой площадке и что остаётся после этого.
 
-    python multi_paper.py            # постоянная работа (отчёт раз в час)
+    python multi_paper.py            # постоянная работа (отчёт раз в час, строка «живой» раз в 10 минут)
     python multi_paper.py --once     # один проход сигналов и выход
     python multi_paper.py --stats    # сводка из файла
 
@@ -27,7 +27,7 @@ from exchanges import make_exchange
 from radar import STRATS
 
 STATE_FILE = os.getenv("MULTI_STATE", "multi_state.json")
-EXCHANGES = [e.strip() for e in os.getenv("MULTI_EXCHANGES", "binance,okx,bybit,xrocket").split(",") if e.strip()]
+EXCHANGES = [e.strip() for e in os.getenv("MULTI_EXCHANGES", "binance,okx,bybit,kucoin,mexc,kraken,coinbase,xrocket").split(",") if e.strip()]
 SYMBOLS = [s.strip() for s in os.getenv(
     "MULTI_SYMBOLS", "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT,BNB/USDT,DOGE/USDT,ADA/USDT,LINK/USDT").split(",") if s.strip()]
 START = float(os.getenv("MULTI_START", "1000"))
@@ -46,15 +46,26 @@ class Venue:
                          else getattr(ccxt, name)({"enableRateLimit": True}))
         if not self.modeled:
             self.ex.load_markets()
-        self.symbols = [s for s in SYMBOLS if self.modeled or s in self.ex.markets]
+        # логический символ (BTC/USDT) -> реальный символ биржи (на Coinbase/Kraken может быть BTC/USD или BTC/USDC)
+        self.sym_map = {}
+        for s in SYMBOLS:
+            base = s.split("/")[0]
+            for cand in (s, f"{base}/USD", f"{base}/USDC"):
+                if self.modeled or cand in self.ex.markets:
+                    self.sym_map[s] = cand
+                    break
+        self.symbols = list(self.sym_map)
+
+    def real(self, sym):
+        return self.sym_map.get(sym, sym)
 
     def fee(self, sym):
         if self.modeled:
             return MODEL_FEE
-        return (self.ex.markets.get(sym) or {}).get("taker") or 0.001
+        return (self.ex.markets.get(self.real(sym)) or {}).get("taker") or 0.001
 
     def candles(self, sym, tf):
-        rows = self.ex.fetch_ohlcv(sym, tf, limit=260)[:-1]           # без незакрытой свечи
+        rows = self.ex.fetch_ohlcv(self.real(sym), tf, limit=260)[:-1]           # без незакрытой свечи
         return pd.DataFrame(rows, columns=COLUMNS)
 
     def marks(self):
@@ -62,8 +73,14 @@ class Venue:
         if self.modeled:
             last = self.ex.fetch_tickers()
             return {s: last[s.replace("/", "-")] * (1 - MODEL_SLIP) for s in self.symbols if s.replace("/", "-") in last}
-        t = self.ex.fetch_tickers(self.symbols)
-        return {s: (t[s].get("bid") or t[s].get("last")) for s in self.symbols if s in t and (t[s].get("bid") or t[s].get("last"))}
+        t = self.ex.fetch_tickers([self.real(s) for s in self.symbols])
+        out = {}
+        for s in self.symbols:
+            tk = t.get(self.real(s)) or {}
+            price = tk.get("bid") or tk.get("last")
+            if price:
+                out[s] = price
+        return out
 
     def buy_fill(self, sym, quote):
         """Купить на `quote` USDT: (количество до комиссии, средняя цена, середина спреда) или None."""
@@ -71,13 +88,15 @@ class Venue:
             last = self.ex.fetch_ticker(sym)["last"]
             price = last * (1 + MODEL_SLIP)
             return quote / price, price, last
-        book = self.ex.fetch_order_book(sym, 50)
+        book = self.ex.fetch_order_book(self.real(sym), 50)
+        if not book["bids"] or not book["asks"]:
+            return None
         mid = (book["bids"][0][0] + book["asks"][0][0]) / 2
         left, qty = quote, 0.0
         for price, amount in book["asks"]:
             take = min(left / price, amount)
             qty, left = qty + take, left - take * price
-            if left <= 1e-9:
+            if left <= 1e-9 and qty > 0:
                 return qty, quote / qty, mid
         return None                                          # стакана не хватило
 
@@ -87,7 +106,9 @@ class Venue:
             last = self.ex.fetch_ticker(sym)["last"]
             price = last * (1 - MODEL_SLIP)
             return qty * price, price, last
-        book = self.ex.fetch_order_book(sym, 50)
+        book = self.ex.fetch_order_book(self.real(sym), 50)
+        if not book["bids"] or not book["asks"]:
+            return None
         mid = (book["bids"][0][0] + book["asks"][0][0]) / 2
         left, got = qty, 0.0
         for price, amount in book["bids"]:
@@ -221,7 +242,9 @@ def run(once=False):
     last = {"1h": None, "4h": None}
     marks_by = {}
     if not once:
-        print("Работает. Подробный отчёт раз в час; остановка: Ctrl+C.")
+        print("Работает. Подробный отчёт раз в час, строка «живой» раз в 10 минут; остановка: Ctrl+C.\n"
+              "Если окно «замёрзло»: в заголовке окна слово «Выбрать/Select» — нажмите Enter или Esc.")
+    last_beat = time.time()
     while True:
         now = time.time()
         tfs = [tf for tf, sec in (("1h", 3600), ("4h", 14400)) if last[tf] != int(now // sec)]
@@ -231,14 +254,21 @@ def run(once=False):
                 m.manage(v, marks_by[v.name])
                 if tfs:
                     m.scan(v, marks_by[v.name], tfs)
-            except (ccxt.NetworkError, ccxt.ExchangeNotAvailable, ccxt.ExchangeError) as e:
-                print(f"{v.name}: {str(e)[:100]}")
+            except Exception as e:  # noqa: BLE001  — одна биржа не должна останавливать весь бот
+                print(f"{v.name}: {type(e).__name__}: {str(e)[:120]}")
         if tfs:
             for tf, sec in (("1h", 3600), ("4h", 14400)):
                 if tf in tfs:
                     last[tf] = int(now // sec)
             m.report(marks_by)
-        m.save()
+        elif not once and now - last_beat >= 600:
+            last_beat = now
+            print(f"[{datetime.now():%H:%M}] живой: бирж {len(m.venues)}, открытых позиций "
+                  f"{sum(len(m.s[v.name]['open']) for v in m.venues)}, закрытых {sum(len(m.s[v.name]['closed']) for v in m.venues)}")
+        try:
+            m.save()
+        except OSError as e:
+            print("Не удалось сохранить состояние:", e)
         if once:
             return
         time.sleep(60)
