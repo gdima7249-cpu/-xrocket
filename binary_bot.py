@@ -33,6 +33,7 @@ STAKE = START * STAKE_PCT                                       # фиксиро
 EPS = float(os.getenv("BINARY_EPS", "0.0005"))                  # минимальное движение для сигнала (0.05%)
 SAMPLE = int(os.getenv("BINARY_SAMPLE_SEC") or max(2, min(30, EXPIRY // 6)))   # опрос цен, секунд
 BEAT = int(os.getenv("BINARY_BEAT_SEC") or (60 if EXPIRY <= 120 else 600))     # как часто печатать строку «работает»
+MIN_CHANGES = int(os.getenv("BINARY_MIN_CHANGES", "3"))        # пара «живая», если цена изменилась хотя бы столько раз за 5 минут
 WARM = max(EXPIRY * 3, 300)                                     # прогрев истории перед ставками
 PREDICTORS = ["random", "always_up", "momentum", "reversal", "rsi"]
 BREAKEVEN = 1 / (1 + PAYOUT)
@@ -86,6 +87,12 @@ class Binary:
             return None if r is None else "up" if r < 30 else "down" if r > 70 else None
 
     # ---------- ставки ----------
+    def active(self, sym, now):
+        """Пара «живая»: за последние 5 минут цена менялась не меньше MIN_CHANGES раз.
+        На малоликвидных парах цена тикера стоит минутами, ставки по ним почти всегда кончаются «ничьей»."""
+        pts = [p for t, p in self.series.get(sym, []) if t >= now - 300]
+        return sum(1 for a, b in zip(pts, pts[1:]) if a != b) >= MIN_CHANGES
+
     def open_stake(self, name):
         a = self.s["acc"][name]
         return a["bal"] * STAKE_PCT if COMPOUND else STAKE
@@ -96,6 +103,8 @@ class Binary:
             dq = self.series.get(sym)
             if not dq or dq[0][0] > now - WARM:
                 continue                                  # мало истории
+            if not self.active(sym, now):
+                continue                                  # цена стоит: ставка почти наверняка станет ничьей
             for name in PREDICTORS:
                 stake = self.open_stake(name)
                 a = self.s["acc"][name]
