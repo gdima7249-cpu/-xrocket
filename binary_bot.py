@@ -19,6 +19,7 @@ from collections import deque
 from datetime import datetime
 
 import ccxt
+import requests
 
 import config  # noqa: F401  (подгружает .env)
 from exchanges import make_exchange
@@ -35,8 +36,42 @@ SAMPLE = int(os.getenv("BINARY_SAMPLE_SEC") or max(2, min(30, EXPIRY // 6)))   #
 BEAT = int(os.getenv("BINARY_BEAT_SEC") or (60 if EXPIRY <= 120 else 600))     # как часто печатать строку «работает»
 MIN_CHANGES = int(os.getenv("BINARY_MIN_CHANGES", "3"))        # пара «живая», если цена изменилась хотя бы столько раз за 5 минут
 WARM = max(EXPIRY * 3, 300)                                     # прогрев истории перед ставками
+SOURCE = os.getenv("BINARY_SOURCE", "xrocket").lower()          # xrocket | binance (публичные данные, ключи не нужны)
+BINANCE_TOP = int(os.getenv("BINARY_BINANCE_TOP", "30"))        # сколько самых ликвидных пар к USDT брать с Binance
+BINANCE_HOSTS = [h for h in (os.getenv("BINARY_BINANCE_URL"), "https://data-api.binance.vision", "https://api.binance.com") if h]
 PREDICTORS = ["random", "always_up", "momentum", "reversal", "rsi"]
 BREAKEVEN = 1 / (1 + PAYOUT)
+
+
+class BinanceSource:
+    """Публичные цены Binance (спот). Берёт BINANCE_TOP самых ликвидных пар к USDT, потом опрашивает цены одним запросом."""
+
+    def __init__(self):
+        self.host, self.symbols = None, []
+        data = self.get("/api/v3/ticker/24hr")
+        bad = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT")
+        usdt = [t for t in data if t["symbol"].endswith("USDT") and not t["symbol"].endswith(bad)]
+        usdt.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
+        self.symbols = [t["symbol"] for t in usdt[:BINANCE_TOP]]
+        print(f"Binance: источник {self.host}, пар под наблюдением {len(self.symbols)}: "
+              f"{', '.join(s[:-4] for s in self.symbols[:10])}...")
+
+    def get(self, path, params=None):
+        last = None
+        for host in ([self.host] if self.host else BINANCE_HOSTS):
+            try:
+                r = requests.get(host + path, params=params, timeout=15)
+                if r.status_code == 200:
+                    self.host = host
+                    return r.json()
+                last = f"{host}: HTTP {r.status_code} {r.text[:100]}"
+            except requests.RequestException as e:
+                last = f"{host}: {e}"
+        raise ccxt.NetworkError("Binance недоступен: " + str(last))
+
+    def fetch_tickers(self):
+        data = self.get("/api/v3/ticker/price", {"symbols": json.dumps(self.symbols, separators=(",", ":"))})
+        return {t["symbol"][:-4] + "-USDT": float(t["price"]) for t in data}
 
 
 class Binary:
@@ -204,7 +239,9 @@ def stats_text(s):
 
 
 def run():
-    ex, bot = make_exchange("xrocket", "paper"), Binary()
+    ex = BinanceSource() if SOURCE == "binance" else make_exchange("xrocket", "paper")
+    bot = Binary()
+    print(f"Источник цен: {SOURCE}")
     print("Бот «вверх/вниз» запущен (виртуальные деньги). История прогревается около "
           f"{WARM // 60} мин, затем ставки каждые {fmt_expiry()} (опрос цен раз в {SAMPLE} с). Остановка: Ctrl+C.")
     last_beat = last_report = time.time()
