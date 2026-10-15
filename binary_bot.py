@@ -1,6 +1,6 @@
 """Виртуальный бот «вверх/вниз» (как бинарные опционы). ТОЛЬКО ВИРТУАЛЬНЫЕ ДЕНЬГИ, реальные ордера не отправляются.
 
-Каждые BINARY_EXPIRY_MIN минут (по умолчанию 5) по каждой паре xRocket несколько «предсказателей» делают виртуальную
+Каждые BINARY_EXPIRY_SEC секунд (или BINARY_EXPIRY_MIN минут; по умолчанию 5 минут) по каждой паре xRocket несколько «предсказателей» делают виртуальную
 ставку «вверх» или «вниз»; по истечении срока ставка закрывается: цена выше/ниже цены входа -> выигрыш +PAYOUT от ставки
 или проигрыш -100% ставки (ничья — возврат). Цены берутся из публичного тикера xRocket (ключ не нужен).
 
@@ -23,14 +23,14 @@ import ccxt
 import config  # noqa: F401  (подгружает .env)
 from exchanges import make_exchange
 
-STATE_FILE = "binary_state.json"
-EXPIRY = int(os.getenv("BINARY_EXPIRY_MIN", "5")) * 60          # срок ставки, секунд
+STATE_FILE = os.getenv("BINARY_STATE", "binary_state.json")
+EXPIRY = int(float(os.getenv("BINARY_EXPIRY_SEC") or float(os.getenv("BINARY_EXPIRY_MIN", "5")) * 60))  # срок ставки, секунд
 PAYOUT = float(os.getenv("BINARY_PAYOUT", "0.85"))              # выплата при выигрыше (доля от ставки)
 START = float(os.getenv("BINARY_START", "1000"))                # виртуальный баланс каждого предсказателя
 STAKE = START * float(os.getenv("BINARY_STAKE_PCT", "0.01"))    # фиксированная ставка (1% от старта)
 EPS = float(os.getenv("BINARY_EPS", "0.0005"))                  # минимальное движение для сигнала (0.05%)
-SAMPLE = 30                                                     # опрос цен, секунд
-WARM = max(EXPIRY * 2, 600)                                     # прогрев истории перед ставками
+SAMPLE = int(os.getenv("BINARY_SAMPLE_SEC") or max(2, min(30, EXPIRY // 6)))   # опрос цен, секунд
+WARM = max(EXPIRY * 3, 300)                                     # прогрев истории перед ставками
 PREDICTORS = ["random", "always_up", "momentum", "reversal", "rsi"]
 BREAKEVEN = 1 / (1 + PAYOUT)
 
@@ -118,9 +118,13 @@ class Binary:
             self.open_bets(prices, now)
 
 
+def fmt_expiry():
+    return f"{EXPIRY} с" if EXPIRY < 120 else f"{EXPIRY // 60} мин"
+
+
 def stats_text(s):
     days = (time.time() - s["since"]) / 86400
-    lines = [f"Виртуальные ставки «вверх/вниз» (срок {EXPIRY // 60} мин, выплата {PAYOUT * 100:.0f}%, "
+    lines = [f"Виртуальные ставки «вверх/вниз» (срок {fmt_expiry()}, выплата {PAYOUT * 100:.0f}%, "
              f"ставка {STAKE:.0f} из {START:.0f}); работает {days:.1f} дн.",
              f"Порог безубыточности: угадывать больше {BREAKEVEN * 100:.2f}% ставок.",
              f"  {'предсказатель':<14}{'ставок':>8}{'ничьих':>8}{'винрейт%':>10}{'прибыль':>10}{'на ставку%':>11}  вывод"]
@@ -142,7 +146,7 @@ def stats_text(s):
 def run():
     ex, bot = make_exchange("xrocket", "paper"), Binary()
     print("Бот «вверх/вниз» запущен (виртуальные деньги). История прогревается около "
-          f"{WARM // 60} мин, затем ставки каждые {EXPIRY // 60} мин. Остановка: Ctrl+C.")
+          f"{WARM // 60} мин, затем ставки каждые {fmt_expiry()} (опрос цен раз в {SAMPLE} с). Остановка: Ctrl+C.")
     last_beat = last_report = time.time()
     while True:
         try:
