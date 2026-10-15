@@ -4,7 +4,7 @@
 ставку «вверх» или «вниз»; по истечении срока ставка закрывается: цена выше/ниже цены входа -> выигрыш +PAYOUT от ставки
 или проигрыш -100% ставки (ничья — возврат). Цены берутся из публичного тикера xRocket (ключ не нужен).
 
-    python binary_bot.py            # постоянная работа (отчёт раз в час, строка «работает» раз в 10 минут)
+    python binary_bot.py            # постоянная работа (отчёт раз в час, строка «работает» раз в минуту при коротких сроках)
     python binary_bot.py --stats    # статистика из файла
 
 Безубыточность при выплате 85%: нужно угадывать >54.05% ставок. Предсказатель random — контроль (ожидаемо около 50% и минус).
@@ -30,6 +30,7 @@ START = float(os.getenv("BINARY_START", "1000"))                # виртуал
 STAKE = START * float(os.getenv("BINARY_STAKE_PCT", "0.01"))    # фиксированная ставка (1% от старта)
 EPS = float(os.getenv("BINARY_EPS", "0.0005"))                  # минимальное движение для сигнала (0.05%)
 SAMPLE = int(os.getenv("BINARY_SAMPLE_SEC") or max(2, min(30, EXPIRY // 6)))   # опрос цен, секунд
+BEAT = int(os.getenv("BINARY_BEAT_SEC") or (60 if EXPIRY <= 120 else 600))     # как часто печатать строку «работает»
 WARM = max(EXPIRY * 3, 300)                                     # прогрев истории перед ставками
 PREDICTORS = ["random", "always_up", "momentum", "reversal", "rsi"]
 BREAKEVEN = 1 / (1 + PAYOUT)
@@ -153,7 +154,7 @@ def run():
             now = time.time()
             bot.tick(ex.fetch_tickers(), now)
             bot.save()
-            if now - last_beat >= 600:
+            if now - last_beat >= BEAT:
                 last_beat = now
                 print(f"[{datetime.now():%H:%M}] работает: открытых ставок {len(bot.s['open'])}, "
                       f"всего закрыто {sum(a['bets'] for a in bot.s['acc'].values())}")
