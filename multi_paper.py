@@ -92,12 +92,12 @@ class Venue:
             last = self.ex.fetch_ticker(sym)["last"]
             price = last * (1 + MODEL_SLIP)
             return quote / price, price, last
-        book = self.ex.fetch_order_book(self.real(sym), 50)
+        book = self.ex.fetch_order_book(self.real(sym), 100)
         if not book["bids"] or not book["asks"]:
             return None
         mid = (book["bids"][0][0] + book["asks"][0][0]) / 2
         left, qty = quote, 0.0
-        for price, amount in book["asks"]:
+        for price, amount in ((r[0], r[1]) for r in book["asks"]):
             take = min(left / price, amount)
             qty, left = qty + take, left - take * price
             if left <= 1e-9 and qty > 0:
@@ -110,12 +110,12 @@ class Venue:
             last = self.ex.fetch_ticker(sym)["last"]
             price = last * (1 - MODEL_SLIP)
             return qty * price, price, last
-        book = self.ex.fetch_order_book(self.real(sym), 50)
+        book = self.ex.fetch_order_book(self.real(sym), 100)
         if not book["bids"] or not book["asks"]:
             return None
         mid = (book["bids"][0][0] + book["asks"][0][0]) / 2
         left, got = qty, 0.0
-        for price, amount in book["bids"]:
+        for price, amount in ((r[0], r[1]) for r in book["bids"]):
             take = min(left, amount)
             got, left = got + take * price, left - take
             if left <= 1e-12:
