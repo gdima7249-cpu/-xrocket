@@ -308,7 +308,7 @@ def run(once=False, execute=False):
             if not once and time.time() - last_beat >= 600:
                 last_beat = time.time()
                 nxt = (int(time.time() // 3600) + 1) * 3600
-                print(f"[{datetime.now():%H:%M}] радар работает: открытых виртуальных позиций {len(r.s['open'])}, "
+                print(f"[{datetime.now():%H:%M}] радар работает: открытых {'позиций' if execute else 'виртуальных позиций'} {len(r.s['open'])}, "
                       f"закрытых сделок {len(r.s['closed'])}; следующий отчёт в {datetime.fromtimestamp(nxt):%H:%M}")
             r.save()
         except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as e:
