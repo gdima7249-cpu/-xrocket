@@ -273,7 +273,7 @@ def main():
             for k in costs))
 
     print("\nВЕРДИКТ (всё сразу: 200+ сделок, 20+ дней входа, ср.% > 0, обе половины > 0, плюс в 60%+ месяцев,"
-          " t-статистика по дням > 3 и лучше контроля минимум на 0.5 п.п.):")
+          " t-статистика (кластеры по дням) > 3 и лучше контроля минимум на 0.5 п.п.):")
     mid = np.median([c["t0"] for c in closed]) if closed else 0
     for st in STRATS:
         rows = [c for c in closed if c["s"] == st]
@@ -284,11 +284,14 @@ def main():
         h1, h2 = summ([c for c in rows if c["t0"] <= mid])[2], summ([c for c in rows if c["t0"] > mid])[2]
         mm = [summ([c for c in rows if month(c) == m])[2] for m in months if any(month(c) == m for c in rows)]
         pos = np.mean([v > 0 for v in mm]) if mm else 0
+        # t-статистика среднего по сделкам с кластеризацией по дням: сделки одного дня зависимы (рынок двигается общий),
+        # поэтому ошибку считаем по суммам отклонений внутри дня
         by_day = {}
-        for c in rows:                                   # сделки одного дня зависимы: считаем день как одно наблюдение
+        for c in rows:
             by_day.setdefault(datetime.fromtimestamp(c["t0"]).date(), []).append(c["ret"] * 100)
-        dm = np.array([np.mean(v) for v in by_day.values()])
-        t_stat = dm.mean() / (dm.std(ddof=1) / np.sqrt(len(dm))) if len(dm) > 2 and dm.std() > 0 else 0.0
+        dev_sums = np.array([np.sum(np.array(v) - avg) for v in by_day.values()])
+        se = np.sqrt((dev_sums ** 2).sum()) / n
+        t_stat = avg / se if se > 0 else 0.0
         better = avg - ctrl_avg.get(st, 0.0)
         ok = (n >= 200 and days >= 20 and avg > 0 and h1 > 0 and h2 > 0 and pos >= 0.6
               and t_stat > 3 and better >= 0.5)
