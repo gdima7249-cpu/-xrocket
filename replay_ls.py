@@ -119,7 +119,7 @@ def run_all(frames, fee, slip):
         for st, (fn, tp, sl, hold) in STRATS.items():
             le, lx, se, sx = (x.to_numpy(bool) for x in fn(df))
             for side, e_idx, x_idx, pe, px, why in simulate(df, le, lx, se, sx, tp, sl, hold):
-                closed.append({"s": st, "sym": sym, "side": side, "reason": why, "t0": float(t[e_idx]),
+                closed.append({"s": st, "sym": sym, "side": side, "reason": why, "t0": float(t[e_idx]), "t1": float(t[x_idx]),
                                "pe": pe, "px": px, "ret": net(side, pe, px, fee, slip)})
     return closed
 
@@ -131,6 +131,60 @@ def summ(rows):
 
 def month(c):
     return datetime.fromtimestamp(c["t0"]).strftime("%Y-%m")
+
+
+def portfolio(trades, pos_pct, max_pos, start=1000.0):
+    """Реальный счёт: каждая сделка берёт pos_pct текущего капитала (но не более max_pos одновременно, иначе пропуск).
+    Учитывает ТОЛЬКО закрытые сделки (просадка внутри сделки не видна). Плечо 1x, фандинг не учтён."""
+    ev = []
+    for i, c in enumerate(sorted(trades, key=lambda c: c["t0"])):
+        ev.append((c["t0"], 1, i, c))
+        ev.append((c["t1"], 0, i, c))               # при равном времени сначала выходы
+    ev.sort(key=lambda e: (e[0], e[1]))
+    equity, open_, taken, skipped, curve = start, {}, 0, 0, []
+    for t, kind, i, c in ev:
+        if kind == 1:
+            if len(open_) < max_pos:
+                open_[i] = equity * pos_pct
+                taken += 1
+            else:
+                skipped += 1
+        elif i in open_:
+            equity += open_.pop(i) * c["ret"]
+            curve.append((t, equity))
+    return equity, curve, taken, skipped
+
+
+def portfolio_report(closed, pos_pct, max_pos):
+    print(f"\nРЕАЛЬНЫЙ СЧЁТ (старт 1000, на сделку {100 * pos_pct:.0f}% капитала, не более {max_pos} позиций сразу; плечо 1x;"
+          " без фандинга; считаются закрытые сделки):")
+    print(f"  {'стратегия':<14}{'итог':>9}{'в год':>8}{'макс.просадка':>15}{'худший месяц':>14}{'плюс-месяцев':>14}{'взято/пропущено':>17}")
+    for st in STRATS:
+        rows = [c for c in closed if c["s"] == st]
+        if not rows:
+            continue
+        eq, curve, taken, skipped = portfolio(rows, pos_pct, max_pos)
+        years = (curve[-1][0] - curve[0][0]) / (365.25 * 86400) if len(curve) > 1 else 1
+        peak, dd, month_eq = 1000.0, 0.0, {}
+        for t, v in curve:
+            peak = max(peak, v)
+            dd = min(dd, v / peak - 1)
+            month_eq[datetime.fromtimestamp(t).strftime("%Y-%m")] = v
+        prev, mret = 1000.0, []
+        for m in sorted(month_eq):
+            mret.append(month_eq[m] / prev - 1)
+            prev = month_eq[m]
+        cagr = (eq / 1000) ** (1 / years) - 1 if eq > 0 else -1
+        print(f"  {st:<14}{eq / 1000:>8.2f}x{100 * cagr:>7.0f}%{100 * dd:>14.0f}%{100 * min(mret):>13.0f}%"
+              f"{100 * np.mean([r > 0 for r in mret]):>13.0f}%{taken:>9}/{skipped:<7}")
+        by_year = {}
+        for t, v in curve:
+            by_year[datetime.fromtimestamp(t).year] = v
+        prev, parts = 1000.0, []
+        for y in sorted(by_year):
+            parts.append(f"{y}: {100 * (by_year[y] / prev - 1):+.0f}%")
+            prev = by_year[y]
+        print("      по годам: " + "  ".join(parts))
 
 
 def selftest():
@@ -196,6 +250,8 @@ def main():
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--plant", action="store_true")
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--pos-pct", type=float, default=0.05, help="доля капитала на сделку для расчёта счёта")
+    ap.add_argument("--max-pos", type=int, default=10, help="максимум одновременных позиций для расчёта счёта")
     ap.add_argument("--seed", type=int, default=0, help="для --synthetic: другой набор случайных данных")
     a = ap.parse_args()
     if a.selftest:
@@ -240,6 +296,8 @@ def main():
     for c in top:
         print(f"  {c['s']:<12}{c['sym']:<6}{'лонг' if c['side'] > 0 else 'шорт':<5}"
               f"{datetime.fromtimestamp(c['t0']):%Y-%m-%d %H:%M}  вход {c['pe']:.6g} -> выход {c['px']:.6g}  {c['ret'] * 100:+.1f}%  ({c['reason']})")
+
+    portfolio_report(closed, a.pos_pct, a.max_pos)
 
     months = sorted({month(c) for c in closed})
     print("\nПо месяцам входа (сделок / ср.% на сделку):")
