@@ -134,8 +134,66 @@ def month(c):
     return datetime.fromtimestamp(c["t0"]).strftime("%Y-%m")
 
 
+def selftest():
+    """Проверка расчёта на вручную составленных свечах: правильный ответ известен заранее."""
+    def candles(rows):
+        return pd.DataFrame([{"time": i * 3600_000.0, "open": o, "high": h, "low": l, "close": c, "volume": 1.0}
+                             for i, (o, h, l, c) in enumerate(rows)])
+
+    def one(rows, entry_at, exit_at=(), tp=0.05, sl=0.03, hold=100):
+        df = candles(rows)
+        en = np.zeros(len(df), bool); en[entry_at] = True
+        ex = np.zeros(len(df), bool)
+        for k in exit_at:
+            ex[k] = True
+        return simulate(df, en, ex, tp, sl, hold)
+
+    flat = (100, 100, 100, 100)
+    checks = []
+    # 1. тейк: вход по открытию свечи 2 (=100), свеча 3 задевает 105 -> выход ровно 105
+    t = one([flat, flat, flat, (100, 106, 99, 104), flat], entry_at=1)
+    checks.append(("тейк-профит срабатывает по цене тейка", t and t[0][4] == "take-profit" and abs(t[0][3] - 105) < 1e-9))
+    # 2. стоп: свеча 3 падает до 96 -> выход 97
+    t = one([flat, flat, flat, (100, 101, 96, 98), flat], entry_at=1)
+    checks.append(("стоп-лосс срабатывает по цене стопа", t and t[0][4] == "stop-loss" and abs(t[0][3] - 97) < 1e-9))
+    # 3. и стоп, и тейк в одной свече -> считается стоп
+    t = one([flat, flat, flat, (100, 107, 95, 100), flat], entry_at=1)
+    checks.append(("стоп и тейк в одной свече -> стоп", t and t[0][4] == "stop-loss"))
+    # 4. гэп вниз за стоп: открытие 90, стоп 97 -> выход по 90 (хуже стопа)
+    t = one([flat, flat, flat, (90, 91, 89, 90), flat], entry_at=1)
+    checks.append(("гэп вниз: выход по цене открытия, не по стопу", t and abs(t[0][3] - 90) < 1e-9))
+    # 5. таймаут
+    t = one([flat] * 8, entry_at=1, hold=3)
+    checks.append(("таймаут закрывает позицию", t and t[0][4] == "timeout" and t[0][1] - t[0][0] == 2))
+    # 6. сигнал выхода: сигнал на свече 4 -> выход по открытию свечи 5
+    rows = [flat, flat, flat, flat, flat, (101, 101, 101, 101), flat]
+    t = one(rows, entry_at=1, exit_at=[4])
+    checks.append(("сигнал выхода: цена открытия следующей свечи", t and t[0][4] == "signal" and abs(t[0][3] - 101) < 1e-9))
+    # 7. вход по открытию СЛЕДУЮЩЕЙ свечи после сигнала (без заглядывания вперёд)
+    rows = [(100, 100, 100, 100), (110, 111, 109, 110), flat, flat]
+    t = one(rows, entry_at=0, tp=0.5, sl=0.5, hold=1)
+    checks.append(("вход по открытию следующей свечи", t and abs(t[0][2] - 110) < 1e-9))
+    # 8. позиция, не закрывшаяся к концу истории, не считается
+    t = one([flat] * 5, entry_at=1, tp=0.5, sl=0.5)
+    checks.append(("незакрытая к концу позиция не учитывается", t == []))
+    # 9. издержки: цена не изменилась, fee 0.1% и slip 0.1% с каждой стороны -> убыток ≈ 0.4%
+    r = net(100, 100, 0.001, 0.001)
+    checks.append(("издержки круга 0.4%", abs(r + 0.004) < 0.0001))
+    # 10. +5% на тейке при тех же издержках ≈ +4.6%
+    r = net(100, 105, 0.001, 0.001)
+    checks.append(("прибыль 5% минус издержки ≈ 4.6%", abs(r - 0.0460) < 0.0005))
+
+    bad = 0
+    for name, ok in checks:
+        print(("  ok   " if ok else "  ОШИБКА  ") + name)
+        bad += not ok
+    print(f"\nИтог: {len(checks) - bad}/{len(checks)} проверок пройдено")
+    raise SystemExit(1 if bad else 0)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--selftest", action="store_true", help="проверить правильность расчёта на ручных примерах")
     ap.add_argument("--days", type=int, default=365)
     ap.add_argument("--pairs", default=",".join(PAIRS))
     ap.add_argument("--fee", type=float, default=0.001, help="комиссия за сторону (0.001 = 0.1%%)")
@@ -143,6 +201,8 @@ def main():
     ap.add_argument("--control-runs", type=int, default=3)
     ap.add_argument("--synthetic", action="store_true")
     a = ap.parse_args()
+    if a.selftest:
+        selftest()
 
     frames = {}
     for i, s in enumerate(a.pairs.split(",")):
