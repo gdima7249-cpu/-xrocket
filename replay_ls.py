@@ -26,6 +26,7 @@ from optimize import shuffled
 from replay import PAIRS, TF_HOURS, download, resample4h, synthetic
 
 BARS_PER_DAY = 6                                   # 4-часовые свечи
+BAR_SEC = 4 * 3600
 
 
 def _ema(s, n):
@@ -139,7 +140,7 @@ def portfolio(trades, pos_pct, max_pos, start=1000.0):
     ev = []
     for i, c in enumerate(sorted(trades, key=lambda c: c["t0"])):
         ev.append((c["t0"], 1, i, c))
-        ev.append((c["t1"], 0, i, c))               # при равном времени сначала выходы
+        ev.append((c["t1"] + BAR_SEC, 0, i, c))     # выход = конец свечи выхода (иначе сделка в одну свечу «зависала» бы)
     ev.sort(key=lambda e: (e[0], e[1]))
     equity, open_, taken, skipped, curve = start, {}, 0, 0, []
     for t, kind, i, c in ev:
@@ -215,6 +216,10 @@ def selftest():
     checks.append(("лонг: тейк по цене тейка (105)", t and t[0][5] == "take-profit" and abs(t[0][4] - 105) < 1e-9))
     checks.append(("прибыль шорта: вход 100, выход 95, издержки 0.4% -> ≈ +4.84%", abs(net(-1, 100, 95, 0.001, 0.001) - 0.0484) < 0.0003))
     checks.append(("убыток шорта: вход 100, выход 103 -> ≈ -3.30%", abs(net(-1, 100, 103, 0.001, 0.001) + 0.0330) < 0.0003))
+    tr = [{"t0": 10, "t1": 10, "ret": -0.06}, {"t0": 10 + 2 * BAR_SEC, "t1": 10 + 3 * BAR_SEC, "ret": 0.1},
+          {"t0": 10 + 5 * BAR_SEC, "t1": 10 + 6 * BAR_SEC, "ret": 0.1}]
+    _, _, taken, skipped = portfolio(tr, 0.5, 1)
+    checks.append(("счёт: сделка в одну свечу не блокирует следующие (3 из 3 при лимите 1)", taken == 3 and skipped == 0))
     checks.append(("лонг без движения: -0.4%", abs(net(1, 100, 100, 0.001, 0.001) + 0.004) < 0.0001))
     checks.append(("шорт без движения: -0.4%", abs(net(-1, 100, 100, 0.001, 0.001) + 0.004) < 0.0001))
     bad = 0
