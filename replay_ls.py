@@ -205,7 +205,8 @@ def main():
     for i, s in enumerate(a.pairs.split(",")):
         try:
             frames[s] = make_synth(a.days, i + 1000 * a.seed, a.plant) if a.synthetic else download(s + "USDT", "4h", a.days)
-            print(f"{s}: {len(frames[s])} 4-часовых свечей", flush=True)
+            gaps = int((np.diff(frames[s]["time"].to_numpy()) != 4 * 3600 * 1000).sum())
+            print(f"{s}: {len(frames[s])} 4-часовых свечей" + (f"  (!) пропусков в данных: {gaps}" if gaps else ""), flush=True)
         except Exception as e:  # noqa: BLE001
             print(f"{s}: пропуск ({type(e).__name__}: {e})")
     if not frames:
@@ -223,6 +224,22 @@ def main():
         nl, _, al = summ([c for c in rows if c["side"] > 0])
         ns, _, as_ = summ([c for c in rows if c["side"] < 0])
         print(f"{st:<14}{n:>8}{w:>6.0f}{avg:>8.2f}{sum(c['ret'] for c in rows) * 100:>9.1f}   {nl:>14} / {al:+.2f}   {ns:>14} / {as_:+.2f}")
+
+    print("\nУстойчивость к выбросам (если результат держится на единичных гигантских сделках — это не стратегия):")
+    print(f"  {'стратегия':<14}{'среднее':>9}{'медиана':>9}{'без 1% лучших и худших':>24}{'без 10 лучших':>15}{'доля прибыли от 10 лучших':>27}")
+    for st in STRATS:
+        r = np.sort(np.array([c["ret"] * 100 for c in closed if c["s"] == st]))
+        if len(r) < 50:
+            continue
+        k = max(1, len(r) // 100)
+        total_pos = r[r > 0].sum()
+        print(f"  {st:<14}{r.mean():>+9.2f}{np.median(r):>+9.2f}{r[k:-k].mean():>+24.2f}{r[:-10].mean():>+15.2f}"
+              f"{100 * r[-10:].sum() / total_pos if total_pos else 0:>26.0f}%")
+    top = sorted(closed, key=lambda c: -c["ret"])[:8]
+    print("\n8 самых прибыльных сделок (проверьте, нет ли тут сбоя данных):")
+    for c in top:
+        print(f"  {c['s']:<12}{c['sym']:<6}{'лонг' if c['side'] > 0 else 'шорт':<5}"
+              f"{datetime.fromtimestamp(c['t0']):%Y-%m-%d %H:%M}  вход {c['pe']:.6g} -> выход {c['px']:.6g}  {c['ret'] * 100:+.1f}%  ({c['reason']})")
 
     months = sorted({month(c) for c in closed})
     print("\nПо месяцам входа (сделок / ср.% на сделку):")
