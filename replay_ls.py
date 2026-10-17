@@ -199,9 +199,9 @@ def portfolio(trades, pos_pct, max_pos, start=1000.0):
     return equity, curve, taken, skipped
 
 
-def portfolio_report(closed, pos_pct, max_pos):
+def portfolio_report(closed, pos_pct, max_pos, funding_on=False):
     print(f"\nРЕАЛЬНЫЙ СЧЁТ (старт 1000, на сделку {100 * pos_pct:.0f}% капитала, не более {max_pos} позиций сразу; плечо 1x;"
-          " без фандинга; считаются закрытые сделки):")
+          " фандинг " + ("УЧТЁН" if funding_on else "не учтён") + "; считаются закрытые сделки):")
     print(f"  {'стратегия':<14}{'итог':>9}{'в год':>8}{'макс.просадка':>15}{'худший месяц':>14}{'плюс-месяцев':>14}{'взято/пропущено':>17}")
     for st in STRATS:
         rows = [c for c in closed if c["s"] == st]
@@ -373,7 +373,7 @@ def main():
         print(f"  {c['s']:<12}{c['sym']:<6}{'лонг' if c['side'] > 0 else 'шорт':<5}"
               f"{datetime.fromtimestamp(c['t0']):%Y-%m-%d %H:%M}  вход {c['pe']:.6g} -> выход {c['px']:.6g}  {c['ret'] * 100:+.1f}%  ({c['reason']})")
 
-    portfolio_report(closed, a.pos_pct, a.max_pos)
+    portfolio_report(closed, a.pos_pct, a.max_pos, bool(funding))
 
     months = sorted({month(c) for c in closed})
     print("\nПо месяцам входа (сделок / ср.% на сделку):")
