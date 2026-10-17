@@ -212,11 +212,14 @@ def main():
     ap.add_argument("--horizons", default="1,5", help="сроки ставки в минутах через запятую")
     ap.add_argument("--pairs", default=",".join(PAIRS))
     ap.add_argument("--folds", type=int, default=6, help="число кусков времени (проверка на 2-м ... последнем)")
+    ap.add_argument("--payout", type=float, default=0.85, help="выплата при выигрыше (0.92 = 92%%); порог безубыточности = 1/(1+выплата)")
     ap.add_argument("--delay", type=int, default=0, help="задержка входа в минутах после сигнала (проверка на реалистичность)")
     ap.add_argument("--gbm", action="store_true", help="добавить градиентный бустинг (нужен: pip install scikit-learn; дольше)")
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--plant", action="store_true", help="с --synthetic: вшить преимущество (проверка детектора)")
     a = ap.parse_args()
+    global PAYOUT, BREAKEVEN
+    PAYOUT, BREAKEVEN = a.payout, 1 / (1 + a.payout)
 
     frames = {}
     for i, s in enumerate(a.pairs.split(",")):
