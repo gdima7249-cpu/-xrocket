@@ -13,6 +13,7 @@
   python binary_research.py                       # 12 пар, 30 дней, горизонты 1 и 5 мин
   python binary_research.py --days 60 --horizons 1,3,5
   python binary_research.py --synthetic           # проверка кода без интернета (случайные данные)
+  python binary_research.py --gbm                 # + градиентный бустинг (pip install scikit-learn)
   python binary_research.py --synthetic --plant   # то же, но с вшитым «преимуществом» — детектор должен его найти
 """
 import argparse
@@ -134,15 +135,23 @@ def z_vs_breakeven(wins, n):
     return (wins / n - BREAKEVEN) / np.sqrt(BREAKEVEN * (1 - BREAKEVEN) / n) if n else float("nan")
 
 
-def walk_forward(data: pd.DataFrame, horizon: int, folds: int, seed: int = 0):
+def make_gbm():
+    """Градиентный бустинг (нелинейная модель; нужен scikit-learn). Умеренная глубина и сильная регуляризация против подгонки."""
+    from sklearn.ensemble import HistGradientBoostingClassifier
+    return HistGradientBoostingClassifier(max_depth=4, max_iter=120, learning_rate=0.05, l2_regularization=5.0,
+                                          min_samples_leaf=500, early_stopping=False, random_state=0)
+
+
+def walk_forward(data: pd.DataFrame, horizon: int, folds: int, seed: int = 0, gbm: bool = False):
     """Возвращает {имя: [(выигрыши, ставки) по каждому тестовому куску]}."""
     t = data["time"]
     edges = pd.to_datetime(np.linspace(t.min().value, t.max().value, folds + 1))
     chunk = np.clip(np.searchsorted(edges, t.values, side="right") - 1, 0, folds - 1)
     X, y = data[FEATURES].to_numpy(), data["y"].to_numpy()
     rng = np.random.default_rng(seed)
-    out = {k: [] for k in ["logreg", "logreg_уверенные20%", "momentum", "reversal", "taker_flow",
-                           "КОНТРОЛЬ(перемешано)"]}
+    names = ["logreg", "logreg_уверенные20%"] + (["gbm", "gbm_уверенные20%"] if gbm else []) + [
+        "momentum", "reversal", "taker_flow", "КОНТРОЛЬ(перемешано)"] + (["КОНТРОЛЬ_gbm(перемешано)"] if gbm else [])
+    out = {k: [] for k in names}
     for k in range(1, folds):                       # обучение: куски < k, проверка: кусок k
         te = chunk == k
         tr = chunk < k
@@ -164,6 +173,16 @@ def walk_forward(data: pd.DataFrame, horizon: int, folds: int, seed: int = 0):
                           ("taker_flow", f["taker5"].to_numpy())):
             mm = sig != 0
             out[name].append((((sig[mm] > 0).astype(float) == y[te][mm]).sum(), int(mm.sum())))
+        if gbm:
+            for tag, labels in (("gbm", y[tr]), ("КОНТРОЛЬ_gbm(перемешано)", rng.permutation(y[tr]))):
+                m_ = make_gbm().fit(X[tr], labels)
+                p_te_g = m_.predict_proba(X[te])[:, 1]
+                side_g = (p_te_g > 0.5).astype(float)
+                out[tag].append(((side_g == y[te]).sum(), te.sum()))
+                if tag == "gbm":
+                    thr_g = np.quantile(np.abs(m_.predict_proba(X[tr])[:, 1] - 0.5), 0.80)   # порог уверенности — по ОБУЧЕНИЮ
+                    mg = np.abs(p_te_g - 0.5) >= thr_g
+                    out["gbm_уверенные20%"].append(((side_g[mg] == y[te][mg]).sum(), int(mg.sum())))
         ctrl = fit_logreg(X[tr], rng.permutation(y[tr]))
         side_c = (predict(ctrl, X[te]) > 0.5).astype(float)
         out["КОНТРОЛЬ(перемешано)"].append(((side_c == y[te]).sum(), te.sum()))
@@ -192,6 +211,7 @@ def main():
     ap.add_argument("--horizons", default="1,5", help="сроки ставки в минутах через запятую")
     ap.add_argument("--pairs", default=",".join(PAIRS))
     ap.add_argument("--folds", type=int, default=6, help="число кусков времени (проверка на 2-м ... последнем)")
+    ap.add_argument("--gbm", action="store_true", help="добавить градиентный бустинг (нужен: pip install scikit-learn; дольше)")
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--plant", action="store_true", help="с --synthetic: вшить преимущество (проверка детектора)")
     a = ap.parse_args()
@@ -212,7 +232,7 @@ def main():
         data = pd.concat([features(df, h).assign(pair=s) for s, df in frames.items()]).sort_values("time")
         data = data.reset_index(drop=True)
         print(f"\n=== срок ставки {h} мин; примеров {len(data)}; порог безубыточности {100 * BREAKEVEN:.2f}% ===")
-        res = walk_forward(data, h, a.folds)
+        res = walk_forward(data, h, a.folds, gbm=a.gbm)
         for name, parts in res.items():
             line, ok = report(name, parts)
             print(line)
