@@ -83,7 +83,7 @@ FEATURES = ["r1", "r3", "r5", "r15", "r60", "rsi", "volat", "vol_ratio", "body",
             "taker", "taker5", "range_pos", "hsin", "hcos"]
 
 
-def features(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
+def features(df: pd.DataFrame, horizon: int, delay: int = 0) -> pd.DataFrame:
     c = df["close"]
     lr = np.log(c).diff()
     vol60 = lr.rolling(60).std()
@@ -102,8 +102,9 @@ def features(df: pd.DataFrame, horizon: int) -> pd.DataFrame:
     f["range_pos"] = (c - lo) / (hi - lo + 1e-12) - 0.5
     minute = df["time"].dt.hour * 60 + df["time"].dt.minute
     f["hsin"], f["hcos"] = np.sin(2 * np.pi * minute / 1440), np.cos(2 * np.pi * minute / 1440)
-    fut = c.shift(-horizon)
-    f["y"] = np.where(fut > c, 1.0, np.where(fut < c, 0.0, np.nan))   # ничья -> NaN (ставка возвращается)
+    # delay: ставка открывается не по цене сигнальной свечи, а на delay минут позже (задержка исполнения/котировки)
+    base, fut = c.shift(-delay), c.shift(-(delay + horizon))
+    f["y"] = np.where(fut > base, 1.0, np.where(fut < base, 0.0, np.nan))   # ничья -> NaN (ставка возвращается)
     f["row"] = np.arange(len(f))
     return f.replace([np.inf, -np.inf], np.nan).dropna(subset=FEATURES + ["y"])
 
@@ -211,6 +212,7 @@ def main():
     ap.add_argument("--horizons", default="1,5", help="сроки ставки в минутах через запятую")
     ap.add_argument("--pairs", default=",".join(PAIRS))
     ap.add_argument("--folds", type=int, default=6, help="число кусков времени (проверка на 2-м ... последнем)")
+    ap.add_argument("--delay", type=int, default=0, help="задержка входа в минутах после сигнала (проверка на реалистичность)")
     ap.add_argument("--gbm", action="store_true", help="добавить градиентный бустинг (нужен: pip install scikit-learn; дольше)")
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--plant", action="store_true", help="с --synthetic: вшить преимущество (проверка детектора)")
@@ -229,9 +231,9 @@ def main():
 
     any_pass = False
     for h in (int(x) for x in a.horizons.split(",")):
-        data = pd.concat([features(df, h).assign(pair=s) for s, df in frames.items()]).sort_values("time")
+        data = pd.concat([features(df, h, a.delay).assign(pair=s) for s, df in frames.items()]).sort_values("time")
         data = data.reset_index(drop=True)
-        print(f"\n=== срок ставки {h} мин; примеров {len(data)}; порог безубыточности {100 * BREAKEVEN:.2f}% ===")
+        print(f"\n=== срок ставки {h} мин; задержка входа {a.delay} мин; примеров {len(data)}; порог безубыточности {100 * BREAKEVEN:.2f}% ===")
         res = walk_forward(data, h, a.folds, gbm=a.gbm)
         for name, parts in res.items():
             line, ok = report(name, parts)
