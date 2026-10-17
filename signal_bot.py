@@ -11,6 +11,7 @@
 выше порога (обычно нужно 500–1000 сигналов).
 
   pip install scikit-learn
+  python signal_bot.py --interactive    # пишете монету (btc, eth, sol...) — бот сразу отвечает направлением
   python signal_bot.py                  # обучение (несколько минут при первом запуске), затем сигналы каждую минуту
   python signal_bot.py --expiry 5 --payout 0.92 --top 0.2 --pairs BTC,ETH,SOL
   python signal_bot.py --selftest       # проверка логики без интернета
@@ -101,9 +102,32 @@ def log_row(row):
     with open(LOG, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(["время", "монета", "направление", "уверенность", "цена", "итог", "итог_с_задержкой"])
+            w.writerow(["время", "монета", "направление", "уверенность", "цена", "итог", "итог_с_задержкой", "сильный"])
         w.writerow([row["t"].strftime("%Y-%m-%d %H:%M:%S"), row["pair"], "ВВЕРХ" if row["dir"] > 0 else "ВНИЗ",
-                    f"{row['p']:.3f}", row["price"], row.get("res"), row.get("res_d")])
+                    f"{row['p']:.3f}", row["price"], row.get("res"), row.get("res_d"), int(row.get("strong", True))])
+
+
+def resolve(pending, rows, frames, expiry):
+    """Проверяет сигналы, у которых прошёл срок (и ещё минута для варианта с задержкой), по реальным ценам Binance."""
+    for r in pending[:]:
+        df = frames.get(r["pair"])
+        if df is None:
+            continue
+        t_exit = r["t"] + pd.Timedelta(minutes=expiry)
+        t_exit_d = t_exit + pd.Timedelta(minutes=1)
+        if df["time"].iloc[-1] < t_exit_d:
+            continue
+
+        def px(tt):
+            m = df["time"] == tt
+            return float(df.loc[m, "close"].iloc[0]) if m.any() else None
+
+        x, e_d, x_d = px(t_exit), px(r["t"] + pd.Timedelta(minutes=1)), px(t_exit_d)
+        if None not in (x, e_d, x_d):
+            r["res"], r["res_d"] = outcome(r["dir"], r["price"], x), outcome(r["dir"], e_d, x_d)
+            pending.remove(r)
+            log_row(r)
+            rows.append(r)
 
 
 def run(a, fetch=fetch_1m, loader=download, sleep=time.sleep, now=time.time, max_iter=None, log=print):
@@ -126,22 +150,7 @@ def run(a, fetch=fetch_1m, loader=download, sleep=time.sleep, now=time.time, max
                     frames[s] = fetch(s)
                 except Exception as e:  # noqa: BLE001
                     log(f"  {s}: {type(e).__name__}: {str(e)[:80]}")
-            # проверка созревших сигналов
-            for r in pending[:]:
-                df = frames.get(r["pair"])
-                if df is None:
-                    continue
-                t_exit = r["t"] + pd.Timedelta(minutes=a.expiry)
-                t_exit_d = t_exit + pd.Timedelta(minutes=1)
-                last_t = df["time"].iloc[-1]
-                if last_t >= t_exit_d:
-                    px = lambda tt: float(df.loc[df["time"] == tt, "close"].iloc[0]) if (df["time"] == tt).any() else None  # noqa: E731
-                    e, x, e_d, x_d = r["price"], px(t_exit), px(r["t"] + pd.Timedelta(minutes=1)), px(t_exit_d)
-                    if None not in (x, e_d, x_d):
-                        r["res"], r["res_d"] = outcome(r["dir"], e, x), outcome(r["dir"], e_d, x_d)
-                        pending.remove(r)
-                        log_row(r)
-                        rows.append(r)
+            resolve(pending, rows, frames, a.expiry)
             # новые сигналы
             for s, df in frames.items():
                 if any(p["pair"] == s for p in pending):              # не повторяем сигнал по той же монете, пока идёт прошлый
@@ -149,7 +158,7 @@ def run(a, fetch=fetch_1m, loader=download, sleep=time.sleep, now=time.time, max
                 sig = signal_for(model, thr, df, a.expiry)
                 if sig:
                     d, p, price = sig
-                    r = {"t": df["time"].iloc[-1], "pair": s, "dir": d, "p": p, "price": price}
+                    r = {"t": df["time"].iloc[-1], "pair": s, "dir": d, "p": p, "price": price, "strong": True}
                     pending.append(r)
                     log(f"\n>>> СИГНАЛ {datetime.now():%H:%M:%S}  {s}/USDT  {'ВВЕРХ ▲' if d > 0 else 'ВНИЗ ▼'}  "
                         f"(уверенность {max(p, 1 - p):.2f}, цена {price:.6g}, срок {a.expiry} мин)")
@@ -158,6 +167,83 @@ def run(a, fetch=fetch_1m, loader=download, sleep=time.sleep, now=time.time, max
                 last_report = now()
                 log(f"[{datetime.now():%H:%M}] {report(rows, a.payout, a.expiry)}")
         sleep(5)
+    return rows
+
+
+def probability(model, df, horizon):
+    """(p вверх, цена закрытия, время свечи) по последней закрытой свече — без порога уверенности."""
+    f = features(df, horizon, live=True)
+    if f.empty or f["time"].iloc[-1] != df["time"].iloc[-1]:
+        return None
+    return float(model.predict_proba(f[FEATURES].iloc[[-1]].to_numpy())[0, 1]), float(df["close"].iloc[-1]), df["time"].iloc[-1]
+
+
+def interactive(a, fetch=fetch_1m, loader=download, input_fn=input, log=print, background=True):
+    """Вы пишете монету (btc, eth, sol, любую с Binance) — бот сразу отвечает направлением. Результаты проверяются сами."""
+    import threading
+    pairs = a.pairs.split(",")
+    model, thr = train(pairs, a.days, a.expiry, a.top, loader, log)
+    pending, rows, lock = [], [], threading.Lock()
+    stop = threading.Event()
+
+    def worker():
+        while not stop.wait(30):
+            with lock:
+                frames = {}
+                for base in {r["pair"] for r in pending}:
+                    try:
+                        frames[base] = fetch(base)
+                    except Exception:  # noqa: BLE001
+                        pass
+                resolve(pending, rows, frames, a.expiry)
+
+    if background:
+        threading.Thread(target=worker, daemon=True).start()
+    log("Команды: название монеты (btc, eth, sol, doge, любая с Binance) — сигнал сразу; stat — итоги; help; q — выход.")
+    while True:
+        try:
+            cmd = input_fn("> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if cmd in ("q", "quit", "exit", "выход"):
+            break
+        if cmd in ("", "help", "?"):
+            log("Пример: btc   -> сигнал по BTC/USDT.   stat -> сколько сигналов угадано.   q -> выход.")
+            continue
+        if cmd in ("stat", "стат", "итоги"):
+            with lock:
+                done = list(rows)
+            strong = [r for r in done if r["strong"]]
+            weak = [r for r in done if not r["strong"]]
+            log(f"Все: {report(done, a.payout, a.expiry)}")
+            if strong:
+                log(f"Только СИЛЬНЫЕ: {report(strong, a.payout, a.expiry)}")
+            if weak:
+                log(f"Только слабые: {report(weak, a.payout, a.expiry)}")
+            log(f"Ждут проверки: {len(pending)}")
+            continue
+        base = cmd.replace("/usdt", "").replace("usdt", "").upper()
+        try:
+            df = fetch(base)
+        except Exception as e:  # noqa: BLE001
+            log(f"  Не удалось получить цены {base}: {type(e).__name__} (проверьте название монеты)")
+            continue
+        res = probability(model, df, a.expiry)
+        if not res:
+            log("  Недостаточно данных для расчёта.")
+            continue
+        p, price, t = res
+        strong = abs(p - 0.5) >= thr
+        d = 1 if p > 0.5 else -1
+        age = max(0, int(datetime.now().timestamp() - (t.timestamp() + 60)))
+        log(f"  {base}/USDT  {'ВВЕРХ ▲' if d > 0 else 'ВНИЗ ▼'}  уверенность {max(p, 1 - p):.2f}  "
+            f"[{'СИЛЬНЫЙ сигнал' if strong else 'слабый: ниже порога, это почти монетка'}]  цена {price:.6g}, срок {a.expiry} мин "
+            f"(данные свечи {age} с назад)")
+        beep()
+        with lock:
+            pending.append({"t": t, "pair": base, "dir": d, "p": p, "price": price, "strong": strong})
+    stop.set()
+    log("Выход.")
     return rows
 
 
@@ -201,12 +287,13 @@ def main():
     ap.add_argument("--expiry", type=int, default=5, help="срок ставки в минутах")
     ap.add_argument("--top", type=float, default=0.2, help="доля самых уверенных сигналов")
     ap.add_argument("--payout", type=float, default=0.92)
+    ap.add_argument("--interactive", action="store_true", help="режим «команда -> сигнал»: пишете монету, бот сразу отвечает")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         selftest()
     try:
-        run(a)
+        (interactive if a.interactive else run)(a)
     except KeyboardInterrupt:
         print("\nОстановлено.")
 
