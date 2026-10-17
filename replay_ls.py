@@ -29,6 +29,39 @@ BARS_PER_DAY = 6                                   # 4-часовые свечи
 BAR_SEC = 4 * 3600
 
 
+FUND_API = "https://fapi.binance.com/fapi/v1/fundingRate"
+
+
+def fetch_funding(symbol, days):
+    """История ставок фандинга бессрочного фьючерса Binance (публично, ключи не нужны): массивы времени (сек) и ставок."""
+    import os
+    import requests
+    os.makedirs("research_cache", exist_ok=True)
+    path = f"research_cache/FUND_{symbol}_{days}d.csv"
+    if os.path.exists(path) and time.time() - os.path.getmtime(path) < 6 * 3600:
+        d = pd.read_csv(path)
+        return d["t"].to_numpy(), d["rate"].to_numpy()
+    since, end, rows = int((time.time() - days * 86400) * 1000), int(time.time() * 1000), []
+    while since < end:
+        r = requests.get(FUND_API, params={"symbol": symbol, "startTime": since, "limit": 1000}, timeout=20)
+        r.raise_for_status()
+        batch = r.json()
+        if not batch:
+            break
+        rows += [(b["fundingTime"] / 1000, float(b["fundingRate"])) for b in batch]
+        since = int(batch[-1]["fundingTime"]) + 1
+        time.sleep(0.05)
+    d = pd.DataFrame(rows, columns=["t", "rate"]).drop_duplicates("t")
+    d.to_csv(path, index=False)
+    return d["t"].to_numpy(), d["rate"].to_numpy()
+
+
+def funding_sum(fund, t0, t1):
+    """Сумма ставок фандинга за время удержания (доля от позиции): положительная ставка — лонги платят шортам."""
+    ft, cum = fund
+    return cum[np.searchsorted(ft, t1, side="right")] - cum[np.searchsorted(ft, t0, side="right")]
+
+
 def _ema(s, n):
     return s.ewm(span=n, adjust=False).mean()
 
@@ -110,7 +143,8 @@ def net(side, pe, px, fee, slip):
     return pe * (1 - slip) * (1 - fee) / (px * (1 + slip) * (1 + fee)) - 1      # шорт: продали дорого, откупили дёшево
 
 
-def run_all(frames, fee, slip, mode="both", names=None):
+def run_all(frames, fee, slip, mode="both", names=None, funding=None):
+    """funding: {sym: (времена_сек, кумулятивные_ставки_с_нулём)} — если задан, к доходности добавляется фандинг (шорт получает, лонг платит)."""
     closed = []
     for sym, df in frames.items():
         if len(df) < 400:
@@ -126,8 +160,11 @@ def run_all(frames, fee, slip, mode="both", names=None):
             elif mode == "long":
                 se = np.zeros_like(se)
             for side, e_idx, x_idx, pe, px, why in simulate(df, le, lx, se, sx, tp, sl, hold):
+                f_part = 0.0
+                if funding and sym in funding:
+                    f_part = side * funding_sum(funding[sym], float(t[e_idx]), float(t[x_idx])) * -1.0
                 closed.append({"s": st, "sym": sym, "side": side, "reason": why, "t0": float(t[e_idx]), "t1": float(t[x_idx]),
-                               "pe": pe, "px": px, "ret": net(side, pe, px, fee, slip)})
+                               "pe": pe, "px": px, "ret": net(side, pe, px, fee, slip) + f_part, "fund": f_part})
     return closed
 
 
@@ -226,6 +263,8 @@ def selftest():
           {"t0": 10 + 5 * BAR_SEC, "t1": 10 + 6 * BAR_SEC, "ret": 0.1}]
     _, _, taken, skipped = portfolio(tr, 0.5, 1)
     checks.append(("счёт: сделка в одну свечу не блокирует следующие (3 из 3 при лимите 1)", taken == 3 and skipped == 0))
+    fund = (np.array([100.0, 200.0, 300.0, 400.0]), np.r_[0.0, np.cumsum([0.0001] * 4)])
+    checks.append(("фандинг: 2 события за период = +0.02%", abs(funding_sum(fund, 150, 350) - 0.0002) < 1e-12))
     checks.append(("лонг без движения: -0.4%", abs(net(1, 100, 100, 0.001, 0.001) + 0.004) < 0.0001))
     checks.append(("шорт без движения: -0.4%", abs(net(-1, 100, 100, 0.001, 0.001) + 0.004) < 0.0001))
     bad = 0
@@ -265,6 +304,7 @@ def main():
     ap.add_argument("--max-pos", type=int, default=10, help="максимум одновременных позиций для расчёта счёта")
     ap.add_argument("--side", choices=["both", "short", "long"], default="both", help="торговать обе стороны, только шорты или только лонги")
     ap.add_argument("--strats", default="", help="через запятую: donchian_ls,ema_ls (по умолчанию все)")
+    ap.add_argument("--funding", action="store_true", help="учесть реальный фандинг бессрочных фьючерсов Binance (нужен доступ к fapi.binance.com)")
     ap.add_argument("--seed", type=int, default=0, help="для --synthetic: другой набор случайных данных")
     a = ap.parse_args()
     if a.selftest:
@@ -285,7 +325,22 @@ def main():
     print(f"\nПериод: {a.days} дн., пар {len(frames)}. Купить и держать: {np.mean(bh):+.0f}%, "
           f"продать и держать (шорт): {-np.mean(bh):+.0f}% (грубо). Издержки круга: {200 * (a.fee + a.slip):.2f}%.\n")
     names = [x for x in a.strats.split(",") if x] or None
-    closed = run_all(frames, a.fee, a.slip, a.side, names)
+    funding = None
+    if a.funding:
+        funding = {}
+        for sym in frames:
+            try:
+                if a.synthetic:                      # искусственный фандинг: +0.01% каждые 8 часов (как в «жадном» рынке)
+                    tt = np.arange(frames[sym]["time"].iloc[0] / 1000, frames[sym]["time"].iloc[-1] / 1000, 8 * 3600)
+                    rr = np.full(len(tt), 0.0001)
+                else:
+                    tt, rr = fetch_funding(sym + "USDT", a.days)
+                if len(tt):
+                    funding[sym] = (tt, np.r_[0.0, np.cumsum(rr)])
+            except Exception as e:  # noqa: BLE001
+                print(f"{sym}: фандинг недоступен ({type(e).__name__}: {str(e)[:80]}) — для этой монеты фандинг = 0")
+        print(f"Фандинг загружен для {len(funding)} из {len(frames)} монет.")
+    closed = run_all(frames, a.fee, a.slip, a.side, names, funding)
 
     print(f"{'стратегия':<14}{'сделок':>8}{'win%':>6}{'ср.%':>8}{'итого%':>9}   лонги: сделок / ср.%   шорты: сделок / ср.%")
     for st in STRATS:
@@ -295,6 +350,13 @@ def main():
         ns, _, as_ = summ([c for c in rows if c["side"] < 0])
         print(f"{st:<14}{n:>8}{w:>6.0f}{avg:>8.2f}{sum(c['ret'] for c in rows) * 100:>9.1f}   {nl:>14} / {al:+.2f}   {ns:>14} / {as_:+.2f}")
 
+    if funding:
+        print("\nВклад фандинга (в среднем на сделку, п.п.; плюс = фандинг приносил деньги):")
+        for st in STRATS:
+            rows = [c for c in closed if c["s"] == st]
+            if rows:
+                print(f"  {st:<14}{100 * np.mean([c['fund'] for c in rows]):>+8.3f}   (шорты {100 * np.mean([c['fund'] for c in rows if c['side'] < 0] or [0]):+.3f},"
+                      f" лонги {100 * np.mean([c['fund'] for c in rows if c['side'] > 0] or [0]):+.3f})")
     print("\nУстойчивость к выбросам (если результат держится на единичных гигантских сделках — это не стратегия):")
     print(f"  {'стратегия':<14}{'среднее':>9}{'медиана':>9}{'без 1% лучших и худших':>24}{'без 10 лучших':>15}{'доля прибыли от 10 лучших':>27}")
     for st in STRATS:
@@ -329,7 +391,7 @@ def main():
         ctrl = []
         for seed in range(1, a.control_runs + 1):
             shuf = {sym: shuffled(d.reset_index(drop=True), seed) for sym, d in frames.items()}
-            ctrl += [c for c in run_all(shuf, a.fee, a.slip, a.side, names) if c["s"] == st]
+            ctrl += [c for c in run_all(shuf, a.fee, a.slip, a.side, names, None) if c["s"] == st]
         n, w, avg = summ(ctrl)
         ctrl_avg[st] = avg
         nr, wr, ar = summ([c for c in closed if c["s"] == st])
