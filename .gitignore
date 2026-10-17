@@ -10,3 +10,4 @@ multi_state.json
 research_cache/
 forward_ls.json
 ls_bot_state.json
+signals_log.csv

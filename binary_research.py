@@ -83,7 +83,7 @@ FEATURES = ["r1", "r3", "r5", "r15", "r60", "rsi", "volat", "vol_ratio", "body",
             "taker", "taker5", "range_pos", "hsin", "hcos"]
 
 
-def features(df: pd.DataFrame, horizon: int, delay: int = 0) -> pd.DataFrame:
+def features(df: pd.DataFrame, horizon: int, delay: int = 0, live: bool = False) -> pd.DataFrame:
     c = df["close"]
     lr = np.log(c).diff()
     vol60 = lr.rolling(60).std()
@@ -106,7 +106,8 @@ def features(df: pd.DataFrame, horizon: int, delay: int = 0) -> pd.DataFrame:
     base, fut = c.shift(-delay), c.shift(-(delay + horizon))
     f["y"] = np.where(fut > base, 1.0, np.where(fut < base, 0.0, np.nan))   # ничья -> NaN (ставка возвращается)
     f["row"] = np.arange(len(f))
-    return f.replace([np.inf, -np.inf], np.nan).dropna(subset=FEATURES + ["y"])
+    f = f.replace([np.inf, -np.inf], np.nan)
+    return f.dropna(subset=FEATURES) if live else f.dropna(subset=FEATURES + ["y"])   # live: последняя свеча без ответа тоже нужна
 
 
 # ---------------------------------------------------------------- модель (numpy)
