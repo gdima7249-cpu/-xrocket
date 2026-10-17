@@ -110,7 +110,7 @@ def net(side, pe, px, fee, slip):
     return pe * (1 - slip) * (1 - fee) / (px * (1 + slip) * (1 + fee)) - 1      # шорт: продали дорого, откупили дёшево
 
 
-def run_all(frames, fee, slip):
+def run_all(frames, fee, slip, mode="both", names=None):
     closed = []
     for sym, df in frames.items():
         if len(df) < 400:
@@ -118,7 +118,13 @@ def run_all(frames, fee, slip):
         df = df.reset_index(drop=True)
         t = df["time"].to_numpy() / 1000
         for st, (fn, tp, sl, hold) in STRATS.items():
+            if names and st not in names:
+                continue
             le, lx, se, sx = (x.to_numpy(bool) for x in fn(df))
+            if mode == "short":
+                le = np.zeros_like(le)
+            elif mode == "long":
+                se = np.zeros_like(se)
             for side, e_idx, x_idx, pe, px, why in simulate(df, le, lx, se, sx, tp, sl, hold):
                 closed.append({"s": st, "sym": sym, "side": side, "reason": why, "t0": float(t[e_idx]), "t1": float(t[x_idx]),
                                "pe": pe, "px": px, "ret": net(side, pe, px, fee, slip)})
@@ -257,6 +263,8 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--pos-pct", type=float, default=0.05, help="доля капитала на сделку для расчёта счёта")
     ap.add_argument("--max-pos", type=int, default=10, help="максимум одновременных позиций для расчёта счёта")
+    ap.add_argument("--side", choices=["both", "short", "long"], default="both", help="торговать обе стороны, только шорты или только лонги")
+    ap.add_argument("--strats", default="", help="через запятую: donchian_ls,ema_ls (по умолчанию все)")
     ap.add_argument("--seed", type=int, default=0, help="для --synthetic: другой набор случайных данных")
     a = ap.parse_args()
     if a.selftest:
@@ -276,7 +284,8 @@ def main():
     bh = [100 * (f["close"].iloc[-1] / f["close"].iloc[0] - 1) for f in frames.values()]
     print(f"\nПериод: {a.days} дн., пар {len(frames)}. Купить и держать: {np.mean(bh):+.0f}%, "
           f"продать и держать (шорт): {-np.mean(bh):+.0f}% (грубо). Издержки круга: {200 * (a.fee + a.slip):.2f}%.\n")
-    closed = run_all(frames, a.fee, a.slip)
+    names = [x for x in a.strats.split(",") if x] or None
+    closed = run_all(frames, a.fee, a.slip, a.side, names)
 
     print(f"{'стратегия':<14}{'сделок':>8}{'win%':>6}{'ср.%':>8}{'итого%':>9}   лонги: сделок / ср.%   шорты: сделок / ср.%")
     for st in STRATS:
@@ -320,7 +329,7 @@ def main():
         ctrl = []
         for seed in range(1, a.control_runs + 1):
             shuf = {sym: shuffled(d.reset_index(drop=True), seed) for sym, d in frames.items()}
-            ctrl += [c for c in run_all(shuf, a.fee, a.slip) if c["s"] == st]
+            ctrl += [c for c in run_all(shuf, a.fee, a.slip, a.side, names) if c["s"] == st]
         n, w, avg = summ(ctrl)
         ctrl_avg[st] = avg
         nr, wr, ar = summ([c for c in closed if c["s"] == st])
