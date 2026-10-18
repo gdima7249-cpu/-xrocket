@@ -9,7 +9,9 @@
 Бот записывает КАЖДУЮ ставку и итог в deriv_log.csv и в отчёте сравнивает винрейт с порогом безубыточности по реальной выплате Deriv.
 
   pip install scikit-learn websocket-client
-  python deriv_demo_bot.py --pairs BTC,ETH --stake 1 --expiry 5
+  python deriv_demo_bot.py --pairs BTC,ETH --stake 1 --expiry 5          # сигналы модели на крипте
+  python deriv_demo_bot.py --mode random --symbol R_100 --unit t --expiry 5 --stake 1 --total 3000   # сам ставит 3000 раз (монетка)
+  python deriv_demo_bot.py --mode random --symbol R_100 --unit t --expiry 5 --stake 2 --martingale 2 --max-stake 32 --total 1000
   python deriv_demo_bot.py --selftest        # проверка логики на имитации (без интернета и токена)
 
 Лимиты безопасности: --max-trades-day (по умолчанию 40), --max-loss (потеря в валюте демо-счёта, после которой бот останавливается).
@@ -53,8 +55,10 @@ class DerivClient:
 
 
 class Trader:
-    def __init__(self, client, stake, expiry, max_trades_day, max_loss, log=print):
+    def __init__(self, client, stake, expiry, max_trades_day, max_loss, log=print, unit="m", martingale=1.0, max_stake=None):
         self.c, self.stake, self.expiry, self.log = client, stake, expiry, log
+        self.base_stake, self.unit, self.martingale = stake, unit, martingale
+        self.max_stake = max_stake or stake * 64
         self.max_trades_day, self.max_loss = max_trades_day, max_loss
         a = self.c.call({"authorize": TOKEN})["authorize"]
         if not a.get("is_virtual"):
@@ -64,23 +68,23 @@ class Trader:
         self.halted = False
         self.log(f"Подключено к ДЕМО-счёту {a.get('loginid')}, баланс {self.balance0:.2f} {self.currency}.")
 
-    def place(self, base, direction, entry_price):
-        """Покупает контракт CALL/PUT на expiry минут. Возвращает True, если ставка принята."""
+    def place(self, base, direction, entry_price, symbol=None):
+        """Покупает контракт CALL/PUT на expiry (минут или тиков). Возвращает True, если ставка принята."""
         if self.halted:
             return False
         if datetime.now().date() != self.day:
             self.day, self.day_trades = datetime.now().date(), 0
         if self.day_trades >= self.max_trades_day:
             return False
-        sym = SYMBOLS[base]
+        sym = symbol or SYMBOLS[base]
         prop = self.c.call({"proposal": 1, "amount": self.stake, "basis": "stake", "contract_type": "CALL" if direction > 0 else "PUT",
-                            "currency": self.currency, "duration": self.expiry, "duration_unit": "m", "symbol": sym})["proposal"]
+                            "currency": self.currency, "duration": self.expiry, "duration_unit": self.unit, "symbol": sym})["proposal"]
         buy = self.c.call({"buy": prop["id"], "price": float(prop["ask_price"])})["buy"]
         payout = float(prop.get("payout", 0))
         self.open[buy["contract_id"]] = {"base": base, "dir": direction, "t": time.time(), "entry": entry_price,
                                          "stake": float(buy["buy_price"]), "payout": payout}
         self.day_trades += 1
-        self.log(f"  СТАВКА {base} {'ВВЕРХ' if direction > 0 else 'ВНИЗ'} на {self.expiry} мин, ставка {buy['buy_price']}, "
+        self.log(f"  СТАВКА {base} {'ВВЕРХ' if direction > 0 else 'ВНИЗ'} на {self.expiry}{'т' if self.unit == 't' else ' мин'}, ставка {buy['buy_price']}, "
                  f"выплата {payout:.2f} (доля выплаты к ставке {payout / float(buy['buy_price']) - 1:.2f})")
         return True
 
@@ -93,6 +97,8 @@ class Trader:
                 profit = float(r.get("profit", 0))
                 o.update(profit=profit, res=1 if profit > 0 else (-1 if profit < 0 else 0))
                 self.done.append(o)
+                if self.martingale > 1:                                    # мартингейл с потолком ставки
+                    self.stake = min(self.max_stake, self.stake * self.martingale) if o["res"] < 0 else self.base_stake
                 self._write(o)
                 self.log(f"  итог {o['base']}: {'ВЫИГРЫШ' if o['res'] > 0 else 'проигрыш' if o['res'] < 0 else 'ничья'} {profit:+.2f}")
                 if sum(x["profit"] for x in self.done) <= -self.max_loss:
@@ -116,8 +122,13 @@ class Trader:
         pay = sum(x["payout"] / x["stake"] - 1 for x in d) / n
         be = 1 / (1 + pay)
         profit = sum(x["profit"] for x in self.done)
-        return (f"Ставок {n}: угадано {100 * w / n:.1f}% (порог при средней выплате {100 * pay:.0f}%: {100 * be:.2f}%), "
-                f"итог {profit:+.2f} {self.currency}" + ("  [мало ставок, <300: выводов делать нельзя]" if n < 300 else ""))
+        from demo_journal import wilson
+        lo, hi = wilson(w, n)
+        verdict = ("интервал целиком выше порога" if lo > be else "интервал целиком ниже порога" if hi < be
+                   else "пока нельзя отличить от порога")
+        return (f"Ставок {n}: угадано {100 * w / n:.1f}% (95%-интервал {100 * lo:.1f}…{100 * hi:.1f}%; порог при средней выплате "
+                f"{100 * pay:.0f}%: {100 * be:.2f}%) — {verdict}; итог {profit:+.2f} {self.currency}"
+                + ("  [мало ставок, <1000: выводов делать нельзя]" if n < 1000 else ""))
 
 
 # ---------------- имитация для самопроверки ----------------
@@ -166,12 +177,42 @@ def selftest():
     t3 = Trader(FakeClient(), 1, 5, 2, 20, log=lambda *a: None)
     ok.append(("дневной лимит ставок", t3.place("BTC", 1, 1.0) and t3.place("BTC", 1, 1.0) and not t3.place("BTC", 1, 1.0)))
     ok.append(("журнал в CSV создан", os.path.exists(LOG)))
+    tm = Trader(FakeClient(outcomes=["lost", "lost", "won", "lost"]), 2, 5, 10 ** 9, 1000, log=lambda *a: None, unit="t", martingale=2, max_stake=8)
+    stakes = []
+    for _ in range(4):
+        stakes.append(tm.stake)
+        tm.place("R_100", 1, 0.0, symbol="R_100")
+        tm.poll()
+    ok.append(("мартингейл: ставки 2,4,8, после выигрыша снова 2", stakes == [2, 4, 8, 2]))
+    ta = Trader(FakeClient(outcomes=["won", "lost"] * 30), 1, 5, 10 ** 9, 1000, log=lambda *a: None, unit="t")
+    run_auto(ta, "R_100", "random", 20, sleep=lambda s_: None, rnd=iter([0.1, 0.9] * 20).__next__, log=lambda *a: None)
+    ok.append(("автономный режим сделал ровно 20 ставок", len(ta.done) == 20 and not ta.open))
     bad = 0
     for name, good in ok:
         print(("  ok   " if good else "  ОШИБКА  ") + name)
         bad += not good
     print(f"\nИтог: {len(ok) - bad}/{len(ok)} проверок пройдено")
     raise SystemExit(1 if bad else 0)
+
+
+def run_auto(trader, symbol, mode, total, sleep=time.sleep, rnd=None, log=print, report_every=50):
+    """Ставит сам: по одному контракту за раз (random — монетка, up/down — всегда в одну сторону), пока не наберётся total ставок."""
+    import random
+    rnd = rnd or random.random
+    placed = 0
+    while placed < total and not trader.halted:
+        direction = (1 if rnd() < 0.5 else -1) if mode == "random" else (1 if mode == "up" else -1)
+        if not trader.place(symbol, direction, 0.0, symbol=symbol):
+            break
+        placed += 1
+        for _ in range(600):                                              # ждём закрытия контракта (до ~20 минут)
+            trader.poll()
+            if not trader.open:
+                break
+            sleep(2)
+        if placed % report_every == 0:
+            log(f"[{datetime.now():%H:%M}] {trader.report()}")
+    log("ИТОГ: " + trader.report())
 
 
 def main():
@@ -183,12 +224,24 @@ def main():
     ap.add_argument("--top", type=float, default=0.2)
     ap.add_argument("--max-trades-day", type=int, default=40)
     ap.add_argument("--max-loss", type=float, default=20.0)
+    ap.add_argument("--mode", default="model", choices=["model", "random", "up", "down"],
+                    help="model — сигналы модели (крипта); random/up/down — автономные ставки на любом символе (--symbol)")
+    ap.add_argument("--symbol", default="R_100", help="символ Deriv для режимов random/up/down (R_100, 1HZ100V, frxEURUSD, cryBTCUSD ...)")
+    ap.add_argument("--unit", default="m", choices=["m", "t"], help="единица срока: m — минуты, t — тики")
+    ap.add_argument("--total", type=int, default=1000, help="сколько ставок сделать в режимах random/up/down")
+    ap.add_argument("--martingale", type=float, default=1.0, help="множитель ставки после проигрыша (1 — фиксированная ставка)")
+    ap.add_argument("--max-stake", type=float, default=None, help="потолок ставки при мартингейле (по умолчанию ставка×64)")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         selftest()
     if not TOKEN:
         raise SystemExit("Впишите DERIV_TOKEN в .env (токен ДЕМО-счёта с правами Read и Trade; никому его не присылайте).")
+    if a.mode != "model":
+        trader = Trader(DerivClient(APP_ID), a.stake, a.expiry, 10 ** 9, a.max_loss, unit=a.unit, martingale=a.martingale, max_stake=a.max_stake)
+        print(f"Автономные ставки на ДЕМО: режим {a.mode}, символ {a.symbol}, срок {a.expiry}{a.unit}, ставка {a.stake}, всего {a.total}. Остановка: Ctrl+C.")
+        run_auto(trader, a.symbol, a.mode, a.total)
+        return
     pairs = [p for p in a.pairs.split(",") if p in SYMBOLS]
     if not pairs:
         raise SystemExit(f"Поддерживаемые монеты: {', '.join(SYMBOLS)}")
