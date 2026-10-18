@@ -30,6 +30,7 @@ import signal_bot as S
 
 TOKEN = os.getenv("DERIV_TOKEN", "")
 APP_ID = os.getenv("DERIV_APP_ID", "1089")
+WS_URL = os.getenv("DERIV_WS_URL", "wss://ws.derivws.com/websockets/v3")
 LOG = "deriv_log.csv"
 SYMBOLS = {"BTC": "cryBTCUSD", "ETH": "cryETHUSD", "LTC": "cryLTCUSD", "BCH": "cryBCHUSD"}   # крипта на Deriv (проверьте список у себя)
 
@@ -39,7 +40,13 @@ class DerivClient:
 
     def __init__(self, app_id):
         import websocket
-        self.ws = websocket.create_connection(f"wss://ws.derivws.com/websockets/v3?app_id={app_id}", timeout=30)
+        url = f"{WS_URL}?app_id={app_id}" if "?" not in WS_URL else WS_URL
+        try:
+            self.ws = websocket.create_connection(url, timeout=30)
+        except Exception as e:  # noqa: BLE001
+            raise SystemExit(f"Не удалось подключиться к {url}: {type(e).__name__}: {str(e)[:150]}\n"
+                             "Адрес API мог измениться или нужен свой app_id: смотрите документацию Deriv API (api.deriv.com), "
+                             "задайте DERIV_WS_URL и DERIV_APP_ID в .env.")
         self.n = 0
 
     def call(self, req):

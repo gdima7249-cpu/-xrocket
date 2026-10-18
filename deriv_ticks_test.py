@@ -18,13 +18,23 @@ import time
 
 import numpy as np
 
-APP_ID = "1089"
+import os
+
+APP_ID = os.getenv("DERIV_APP_ID", "1089")
+WS_URL = os.getenv("DERIV_WS_URL", "wss://ws.derivws.com/websockets/v3")
 
 
 def fetch_ticks(symbol, total, app_id=APP_ID):
     """Публичная история тиков (по 5000 за запрос, назад во времени). Возвращает массив цен в хронологическом порядке."""
     import websocket
-    ws = websocket.create_connection(f"wss://ws.derivws.com/websockets/v3?app_id={app_id}", timeout=30)
+    url = f"{WS_URL}?app_id={app_id}" if "?" not in WS_URL else WS_URL
+    try:
+        ws = websocket.create_connection(url, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        raise SystemExit(f"Не удалось подключиться к {url}: {type(e).__name__}: {str(e)[:150]}\n"
+                         "Статус 520 приходит от Cloudflare: адрес API мог измениться или нужен свой app_id. Откройте документацию Deriv API "
+                         "(api.deriv.com), найдите актуальный адрес WebSocket и зарегистрируйте свой app_id, затем задайте их так (cmd):\n"
+                         "  set DERIV_WS_URL=wss://...адрес из документации...\n  set DERIV_APP_ID=ваш_app_id")
     prices, end = [], "latest"
     try:
         while len(prices) < total:
