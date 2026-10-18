@@ -83,7 +83,7 @@ FEATURES = ["r1", "r3", "r5", "r15", "r60", "rsi", "volat", "vol_ratio", "body",
             "taker", "taker5", "range_pos", "hsin", "hcos"]
 
 
-def features(df: pd.DataFrame, horizon: int, delay: int = 0, live: bool = False) -> pd.DataFrame:
+def features(df: pd.DataFrame, horizon: int, delay: int = 0, live: bool = False, btc: pd.DataFrame = None) -> pd.DataFrame:
     c = df["close"]
     lr = np.log(c).diff()
     vol60 = lr.rolling(60).std()
@@ -106,8 +106,18 @@ def features(df: pd.DataFrame, horizon: int, delay: int = 0, live: bool = False)
     base, fut = c.shift(-delay), c.shift(-(delay + horizon))
     f["y"] = np.where(fut > base, 1.0, np.where(fut < base, 0.0, np.nan))   # ничья -> NaN (ставка возвращается)
     f["row"] = np.arange(len(f))
+    if btc is not None:                                        # движение лидера рынка (BTC) за последние минуты
+        b = btc.set_index("time")
+        bl = np.log(b["close"])
+        bf = pd.DataFrame({"btc_r1": bl.diff(1), "btc_r3": bl.diff(3), "btc_r5": bl.diff(5),
+                           "btc_taker": b["taker_buy"] / (b["volume"] + 1e-12) - 0.5})
+        vol_b = bl.diff().rolling(60).std() + 1e-12
+        for c_ in ("btc_r1", "btc_r3", "btc_r5"):
+            bf[c_] = bf[c_] / vol_b
+        f = f.merge(bf, left_on="time", right_index=True, how="left")
     f = f.replace([np.inf, -np.inf], np.nan)
-    return f.dropna(subset=FEATURES) if live else f.dropna(subset=FEATURES + ["y"])   # live: последняя свеча без ответа тоже нужна
+    cols = ACTIVE["cols"]
+    return f.dropna(subset=cols) if live else f.dropna(subset=cols + ["y"])   # live: последняя свеча без ответа тоже нужна
 
 
 # ---------------------------------------------------------------- модель (numpy)
@@ -137,6 +147,10 @@ def z_vs_breakeven(wins, n):
     return (wins / n - BREAKEVEN) / np.sqrt(BREAKEVEN * (1 - BREAKEVEN) / n) if n else float("nan")
 
 
+CROSS = ["btc_r1", "btc_r3", "btc_r5", "btc_taker"]
+ACTIVE = {"cols": list(FEATURES)}
+
+
 def make_gbm():
     """Градиентный бустинг (нелинейная модель; нужен scikit-learn). Умеренная глубина и сильная регуляризация против подгонки."""
     from sklearn.ensemble import HistGradientBoostingClassifier
@@ -149,7 +163,7 @@ def walk_forward(data: pd.DataFrame, horizon: int, folds: int, seed: int = 0, gb
     t = data["time"]
     edges = pd.to_datetime(np.linspace(t.min().value, t.max().value, folds + 1))
     chunk = np.clip(np.searchsorted(edges, t.values, side="right") - 1, 0, folds - 1)
-    X, y = data[FEATURES].to_numpy(), data["y"].to_numpy()
+    X, y = data[ACTIVE["cols"]].to_numpy(), data["y"].to_numpy()
     rng = np.random.default_rng(seed)
     names = ["logreg", "logreg_уверенные20%"] + (["gbm", "gbm_уверенные20%"] if gbm else []) + [
         "momentum", "reversal", "taker_flow", "КОНТРОЛЬ(перемешано)"] + (["КОНТРОЛЬ_gbm(перемешано)"] if gbm else [])
@@ -223,6 +237,7 @@ def main():
     ap.add_argument("--pairs", default=",".join(PAIRS))
     ap.add_argument("--folds", type=int, default=6, help="число кусков времени (проверка на 2-м ... последнем)")
     ap.add_argument("--payout", type=float, default=0.85, help="выплата при выигрыше (0.92 = 92%%); порог безубыточности = 1/(1+выплата)")
+    ap.add_argument("--cross", action="store_true", help="добавить признаки движения BTC (лидер рынка) для всех монет")
     ap.add_argument("--by-hour", action="store_true", help="показать результат по времени суток (4 блока по 6 часов, UTC; Москва = UTC+3)")
     ap.add_argument("--delay", type=int, default=0, help="задержка входа в минутах после сигнала (проверка на реалистичность)")
     ap.add_argument("--gbm", action="store_true", help="добавить градиентный бустинг (нужен: pip install scikit-learn; дольше)")
@@ -231,6 +246,8 @@ def main():
     a = ap.parse_args()
     global PAYOUT, BREAKEVEN
     PAYOUT, BREAKEVEN = a.payout, 1 / (1 + a.payout)
+    if a.cross:
+        ACTIVE["cols"] = list(FEATURES) + CROSS
 
     frames = {}
     for i, s in enumerate(a.pairs.split(",")):
@@ -243,9 +260,15 @@ def main():
     if not frames:
         raise SystemExit("Нет данных (проверьте интернет/доступ к data-api.binance.vision)")
 
+    btc_frame = None
+    if a.cross:
+        btc_frame = frames.get("BTC")
+        if btc_frame is None:
+            btc_frame = synthetic(a.days * 1440, 0, a.plant) if a.synthetic else download("BTCUSDT", a.days)
+        print("Режим --cross: к признакам каждой монеты добавлено движение BTC (1, 3, 5 минут и поток покупок).")
     any_pass = False
     for h in (int(x) for x in a.horizons.split(",")):
-        data = pd.concat([features(df, h, a.delay).assign(pair=s) for s, df in frames.items()]).sort_values("time")
+        data = pd.concat([features(df, h, a.delay, btc=btc_frame).assign(pair=s) for s, df in frames.items()]).sort_values("time")
         data = data.reset_index(drop=True)
         print(f"\n=== срок ставки {h} мин; задержка входа {a.delay} мин; примеров {len(data)}; порог безубыточности {100 * BREAKEVEN:.2f}% ===")
         hours = {} if a.by_hour else None
