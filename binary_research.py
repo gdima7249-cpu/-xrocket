@@ -144,7 +144,7 @@ def make_gbm():
                                           min_samples_leaf=500, early_stopping=False, random_state=0)
 
 
-def walk_forward(data: pd.DataFrame, horizon: int, folds: int, seed: int = 0, gbm: bool = False):
+def walk_forward(data: pd.DataFrame, horizon: int, folds: int, seed: int = 0, gbm: bool = False, hours: dict = None):
     """Возвращает {имя: [(выигрыши, ставки) по каждому тестовому куску]}."""
     t = data["time"]
     edges = pd.to_datetime(np.linspace(t.min().value, t.max().value, folds + 1))
@@ -166,10 +166,15 @@ def walk_forward(data: pd.DataFrame, horizon: int, folds: int, seed: int = 0, gb
         p_te = predict(model, X[te])
         p_tr = predict(model, X[tr])
         side = (p_te > 0.5).astype(float)
+        hh = data["time"].dt.hour.to_numpy()[te]
+        if hours is not None:
+            hours.setdefault("logreg", []).extend(zip(hh, (side == y[te]).astype(int)))
         out["logreg"].append(((side == y[te]).sum(), te.sum()))
         thr = np.quantile(np.abs(p_tr - 0.5), 0.80)               # порог уверенности выбран по ОБУЧЕНИЮ
         m = np.abs(p_te - 0.5) >= thr
         out["logreg_уверенные20%"].append(((side[m] == y[te][m]).sum(), int(m.sum())))
+        if hours is not None:
+            hours.setdefault("logreg_уверенные20%", []).extend(zip(hh[m], (side[m] == y[te][m]).astype(int)))
         f = data[te]
         for name, sig in (("momentum", f["r1"].to_numpy()), ("reversal", -f["r1"].to_numpy()),
                           ("taker_flow", f["taker5"].to_numpy())):
@@ -181,10 +186,14 @@ def walk_forward(data: pd.DataFrame, horizon: int, folds: int, seed: int = 0, gb
                 p_te_g = m_.predict_proba(X[te])[:, 1]
                 side_g = (p_te_g > 0.5).astype(float)
                 out[tag].append(((side_g == y[te]).sum(), te.sum()))
+                if tag == "gbm" and hours is not None:
+                    hours.setdefault("gbm", []).extend(zip(hh, (side_g == y[te]).astype(int)))
                 if tag == "gbm":
                     thr_g = np.quantile(np.abs(m_.predict_proba(X[tr])[:, 1] - 0.5), 0.80)   # порог уверенности — по ОБУЧЕНИЮ
                     mg = np.abs(p_te_g - 0.5) >= thr_g
                     out["gbm_уверенные20%"].append(((side_g[mg] == y[te][mg]).sum(), int(mg.sum())))
+                    if hours is not None:
+                        hours.setdefault("gbm_уверенные20%", []).extend(zip(hh[mg], (side_g[mg] == y[te][mg]).astype(int)))
         ctrl = fit_logreg(X[tr], rng.permutation(y[tr]))
         side_c = (predict(ctrl, X[te]) > 0.5).astype(float)
         out["КОНТРОЛЬ(перемешано)"].append(((side_c == y[te]).sum(), te.sum()))
@@ -214,6 +223,7 @@ def main():
     ap.add_argument("--pairs", default=",".join(PAIRS))
     ap.add_argument("--folds", type=int, default=6, help="число кусков времени (проверка на 2-м ... последнем)")
     ap.add_argument("--payout", type=float, default=0.85, help="выплата при выигрыше (0.92 = 92%%); порог безубыточности = 1/(1+выплата)")
+    ap.add_argument("--by-hour", action="store_true", help="показать результат по времени суток (4 блока по 6 часов, UTC; Москва = UTC+3)")
     ap.add_argument("--delay", type=int, default=0, help="задержка входа в минутах после сигнала (проверка на реалистичность)")
     ap.add_argument("--gbm", action="store_true", help="добавить градиентный бустинг (нужен: pip install scikit-learn; дольше)")
     ap.add_argument("--synthetic", action="store_true")
@@ -238,11 +248,25 @@ def main():
         data = pd.concat([features(df, h, a.delay).assign(pair=s) for s, df in frames.items()]).sort_values("time")
         data = data.reset_index(drop=True)
         print(f"\n=== срок ставки {h} мин; задержка входа {a.delay} мин; примеров {len(data)}; порог безубыточности {100 * BREAKEVEN:.2f}% ===")
-        res = walk_forward(data, h, a.folds, gbm=a.gbm)
+        hours = {} if a.by_hour else None
+        res = walk_forward(data, h, a.folds, gbm=a.gbm, hours=hours)
         for name, parts in res.items():
             line, ok = report(name, parts)
             print(line)
             any_pass |= ok and not name.startswith("КОНТРОЛЬ")
+        if hours:
+            blocks = [("00–06", range(0, 6)), ("06–12", range(6, 12)), ("12–18", range(12, 18)), ("18–24", range(18, 24))]
+            print(f"\n  По времени суток (UTC; Москва = UTC+3): винрейт % / ставок. Порог {100 * BREAKEVEN:.2f}%. "
+                  f"Блоков всего 4 и это одна из многих разбивок, поэтому случайные отличия вероятны.")
+            print(f"  {'вариант':<22}" + "".join(f"{b:>16}" for b, _ in blocks))
+            for name, rows in hours.items():
+                if name.startswith("КОНТРОЛЬ"):
+                    continue
+                cells = []
+                for _, rng_ in blocks:
+                    sel = [c for hh_, c in rows if hh_ in rng_]
+                    cells.append(f"{100 * np.mean(sel):.1f} / {len(sel)}" if sel else "-")
+                print(f"  {name:<22}" + "".join(f"{c:>16}" for c in cells))
     print("\nВЕРДИКТ:", "есть кандидат — повторить на другом периоде/парах, потом живой виртуальный тест"
           if any_pass else "преимущества над порогом не найдено (контроль ~50% — тест честный)")
     print("PASS = z>3 против порога И не менее 80% кусков времени выше порога. Перебирается много"
