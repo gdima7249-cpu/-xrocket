@@ -163,7 +163,11 @@ class Trader:
                 if self.martingale > 1:                                    # мартингейл с потолком ставки
                     self.stake = min(self.max_stake, self.stake * self.martingale) if o["res"] < 0 else self.base_stake
                 self._write(o)
-                self.log(f"  итог {o['base']}: {'ВЫИГРЫШ' if o['res'] > 0 else 'проигрыш' if o['res'] < 0 else 'ничья'} {profit:+.2f}")
+                ent = r.get("entry_tick", r.get("entry_spot", "?"))
+                ext = r.get("exit_tick", r.get("exit_spot", r.get("sell_spot", "?")))
+                ct = r.get("contract_type", "CALL" if o["dir"] > 0 else "PUT")
+                self.log(f"  итог {o['base']}: {'ВЫИГРЫШ' if o['res'] > 0 else 'проигрыш' if o['res'] < 0 else 'ничья'} {profit:+.2f}   "
+                         f"[{ct} {'вверх' if ct.startswith('CALL') else 'вниз'}: вход {ent} → выход {ext}, контракт {cid}]")
                 if sum(x["profit"] for x in self.done) <= -self.max_loss:
                     self.halted = True
                     self.log(f"ЛИМИТ ПОТЕРЬ достигнут ({self.max_loss}): новых ставок не будет.")
