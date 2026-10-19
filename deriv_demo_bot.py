@@ -63,28 +63,50 @@ def get_demo_ws_url(token, app_id, account_id, post=None):
 class DerivClient:
     """Минимальный клиент WebSocket API Deriv: запрос -> ответ с тем же req_id."""
 
-    def __init__(self, app_id, url=None):
-        import websocket
+    def __init__(self, app_id, url=None, refresh=None):
         self.preauth = bool(url)                                          # адрес с OTP уже авторизован: отдельный authorize не нужен
+        self.refresh = refresh                                            # функция, выдающая новый адрес (новый OTP) при обрыве
         url = url or (f"{WS_URL}?app_id={app_id or '1089'}" if "?" not in WS_URL else WS_URL)
+        self._open(url)
+        self.n = 0
+        self.last = time.time()
+
+    def _open(self, url):
+        import websocket
         try:
             self.ws = websocket.create_connection(url, timeout=30)
         except Exception as e:  # noqa: BLE001
             raise SystemExit(f"Не удалось подключиться к {url}: {type(e).__name__}: {str(e)[:150]}\n"
                              "Адрес API мог измениться или нужен свой app_id: смотрите документацию Deriv API (api.deriv.com), "
                              "задайте DERIV_WS_URL и DERIV_APP_ID в .env.")
-        self.n = 0
+
+    def idle_ping(self, every=20):
+        """Не даёт серверу закрыть простаивающее соединение."""
+        if time.time() - self.last > every:
+            try:
+                self.call({"ping": 1})
+            except Exception:  # noqa: BLE001
+                pass
 
     def call(self, req):
-        self.n += 1
-        req = dict(req, req_id=self.n)
-        self.ws.send(json.dumps(req))
-        while True:
-            msg = json.loads(self.ws.recv())
-            if msg.get("req_id") == self.n:
-                if msg.get("error"):
-                    raise RuntimeError(f"Deriv API: {msg['error'].get('code')}: {msg['error'].get('message')}")
-                return msg
+        import websocket
+        for attempt in (0, 1):
+            self.n += 1
+            r = dict(req, req_id=self.n)
+            try:
+                self.ws.send(json.dumps(r))
+                while True:
+                    msg = json.loads(self.ws.recv())
+                    if msg.get("req_id") == self.n:
+                        self.last = time.time()
+                        if msg.get("error"):
+                            raise RuntimeError(f"Deriv API: {msg['error'].get('code')}: {msg['error'].get('message')}")
+                        return msg
+            except (websocket.WebSocketException, OSError):
+                if attempt or not self.refresh:
+                    raise
+                print("  соединение с Deriv закрылось, открываю заново (новый OTP)...")
+                self._open(self.refresh())
 
 
 class Trader:
@@ -275,7 +297,8 @@ def run_auto(trader, symbol, mode, total, sleep=time.sleep, rnd=None, log=print,
 def connect():
     """Новая схема Deriv: токен + номер демо-счёта -> OTP -> WebSocket (только демо). Старая схема — если DERIV_ACCOUNT_ID не задан."""
     if ACCOUNT_ID:
-        return DerivClient(APP_ID, url=get_demo_ws_url(TOKEN, APP_ID, ACCOUNT_ID))
+        return DerivClient(APP_ID, url=get_demo_ws_url(TOKEN, APP_ID, ACCOUNT_ID),
+                           refresh=lambda: get_demo_ws_url(TOKEN, APP_ID, ACCOUNT_ID))
     return DerivClient(APP_ID)
 
 

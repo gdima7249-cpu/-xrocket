@@ -158,6 +158,7 @@ def run_live(trader, symbol, model, thr, vol, ahead, total, ticks, log=print, re
         n += 1
         buf.append(price)
         buf = buf[-200:]
+        getattr(trader.c, "idle_ping", lambda: None)()
         if trader.open:
             trader.poll()
         if trader.halted and not trader.open:
