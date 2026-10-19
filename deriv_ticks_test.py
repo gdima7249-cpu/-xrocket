@@ -17,6 +17,7 @@ import json
 import time
 
 import numpy as np
+from sklearn.ensemble import HistGradientBoostingClassifier
 
 import os
 
