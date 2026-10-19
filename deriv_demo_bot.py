@@ -139,6 +139,11 @@ class Trader:
             self.day, self.day_trades = datetime.now().date(), 0
         if self.day_trades >= self.max_trades_day:
             return False
+        left = self.max_loss + sum(x["profit"] for x in self.done)           # сколько ещё можно потерять до лимита
+        if self.stake > left + 1e-9:
+            self.halted = True
+            self.log(f"СЛЕДУЮЩАЯ СТАВКА {self.stake:g} больше остатка до лимита потерь ({left:.2f}): серия проигрышей съела запас, бот остановлен.")
+            return False
         sym = symbol or SYMBOLS[base]
         prop = self.c.call({"proposal": 1, "amount": self.stake, "basis": "stake", "contract_type": "CALL" if direction > 0 else "PUT",
                             "currency": self.currency, "duration": self.expiry, "duration_unit": self.unit, "underlying_symbol": sym})["proposal"]

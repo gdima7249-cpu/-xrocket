@@ -236,6 +236,8 @@ def main():
     ap.add_argument("--total", type=int, default=1000, help="сколько ставок сделать")
     ap.add_argument("--ticks-history", type=int, default=100000)
     ap.add_argument("--max-loss", type=float, default=20.0)
+    ap.add_argument("--martingale", type=float, default=1.0, help="множитель ставки после проигрыша (2 — удвоение; 1 — фиксированная)")
+    ap.add_argument("--max-stake", type=float, default=None, help="потолок ставки при мартингейле")
     ap.add_argument("--payout-check", action="store_true", help="только спросить у Deriv выплату (ничего не покупать)")
     ap.add_argument("--symbols", default="cryBTCUSD,cryETHUSD,R_100", help="для --payout-check")
     ap.add_argument("--selftest", action="store_true")
@@ -251,7 +253,7 @@ def main():
         return
     prices = T.fetch_ticks(a.symbol, a.ticks_history)
     model, thr, vol = train_model(prices, a.ahead, a.top)
-    trader = B.Trader(B.connect(), a.stake, a.ahead, 10 ** 9, a.max_loss, unit="t")
+    trader = B.Trader(B.connect(), a.stake, a.ahead, 10 ** 9, a.max_loss, unit="t", martingale=a.martingale, max_stake=a.max_stake)
     print(f"Работает на ДЕМО: {a.symbol}, {a.ahead} тиков, ставка {a.stake}, всего {a.total} ставок, лимит потерь {a.max_loss}. Остановка: Ctrl+C.")
     try:
         run_live(trader, a.symbol, model, thr, vol, a.ahead, a.total, tick_stream(a.symbol))
