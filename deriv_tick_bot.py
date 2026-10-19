@@ -66,22 +66,46 @@ def signal(model, thr, prices, vol):
     return (1 if p > 0.5 else -1), p
 
 
-def tick_stream(symbol, ws=None):
-    """Генератор живых тиков (цена, время). Подписка на публичную ленту."""
-    if ws is None:
-        import websocket
-        ws = websocket.create_connection(PUBLIC_WS, timeout=30)
-    ws.send(json.dumps({"ticks": symbol, "subscribe": 1}))
+def tick_stream(symbol, ws=None, log=print):
+    """Генератор живых тиков (цена, время). Подписка на публичную ленту; при обрыве переподключается."""
+    import websocket
+    own = ws is None
+    keys = ["ticks", "underlying_symbol"]                  # новый API мог переименовать поле; пробуем по очереди
+    attempt = 0
+    got_any = False
     while True:
-        raw = ws.recv()
-        msg = json.loads(raw)
-        if DEBUG:
-            print("DEBUG tick msg:", str(msg)[:200])
-        if msg.get("error"):
-            raise SystemExit(f"Deriv API (ticks): {msg['error'].get('message')}")
-        t = msg.get("tick")
-        if t and "quote" in t:
-            yield float(t["quote"]), t.get("epoch")
+        try:
+            if own:
+                ws = websocket.create_connection(PUBLIC_WS, timeout=20)
+            req = {"ticks": symbol, "subscribe": 1} if keys[attempt % 2] == "ticks" else {"ticks": symbol, "underlying_symbol": symbol, "subscribe": 1}
+            ws.send(json.dumps(req))
+            last_ping = time.time()
+            while True:
+                try:
+                    raw = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    ws.send(json.dumps({"ping": 1}))
+                    continue
+                msg = json.loads(raw)
+                if DEBUG:
+                    print("DEBUG tick msg:", str(msg)[:200])
+                if msg.get("error"):
+                    raise RuntimeError(f"Deriv API (ticks): {msg['error'].get('message')}")
+                t = msg.get("tick")
+                if t and "quote" in t:
+                    got_any = True
+                    yield float(t["quote"]), t.get("epoch")
+                if time.time() - last_ping > 20:
+                    ws.send(json.dumps({"ping": 1}))
+                    last_ping = time.time()
+        except (websocket.WebSocketException, OSError, RuntimeError) as e:
+            if not own:
+                raise
+            attempt += 1
+            log(f"  лента тиков оборвалась ({type(e).__name__}: {str(e)[:80]}), переподключаюсь (попытка {attempt})...")
+            if attempt >= 8 and not got_any:
+                raise SystemExit("Лента тиков не отдаёт данные. Запустите с DERIV_DEBUG=1 (cmd: set DERIV_DEBUG=1) и пришлите вывод.")
+            time.sleep(min(10, 2 * attempt))
 
 
 def payout_check(symbols, expiry, unit):
