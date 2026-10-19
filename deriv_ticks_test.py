@@ -88,7 +88,7 @@ def make_xy(prices, ahead, lags=20):
         idx.append(t)
     X, y = np.array(X), np.array(y)
     ok = ~np.isnan(y)
-    return X[ok], y[ok]
+    return X[ok], y[ok], float(1 - ok.mean())
 
 
 def leakage_share(X, folds=5):
@@ -140,7 +140,9 @@ def main():
 
     prices = synthetic(a.ticks) if a.synthetic else fetch_ticks(a.symbol, a.ticks)
     print(f"Тиков {len(prices)} ({a.symbol}), смотрим направление через {a.ahead} тиков.")
-    X, y = make_xy(prices, a.ahead)
+    X, y, tie_share = make_xy(prices, a.ahead)
+    print(f"Доля ничьих (цена через {a.ahead} тиков ровно такая же): {100 * tie_share:.1f}%. "
+          "Если ничья считается проигрышем (так при выключенных «равных значениях»), реальный винрейт = угадано × (1 − доля ничьих).")
     leak = leakage_share(X)
     print(f"Проверка на утечку данных: доля проверочных примеров, уже виденных при обучении = {100 * leak:.1f}% (должно быть около 0%).")
     if leak > 0.02:
@@ -154,6 +156,19 @@ def main():
         per = " ".join(f"{100 * v / m:.1f}" for v, m in parts if m)
         z = (w / n - be) / np.sqrt(be * (1 - be) / n) if n else float("nan")
         print(f"  {name:<38}{n:>9}{100 * w / n:>8.2f}%  [{per}]   z против порога {z:+.1f}")
+    best = rows["gbm_уверенные20%"]
+    n = sum(m for _, m in best)
+    w = sum(int(v) for v, _ in best)
+    if n:
+        p_eff = (w / n) * (1 - tie_share)
+        print(f"\n  Для «gbm_уверенные20%» (угадано {100 * w / n:.2f}% среди ставок без ничьих):")
+        print(f"    с учётом ничьих как проигрышей реальный винрейт ≈ {100 * p_eff:.2f}%")
+        print(f"    {'выплата':<10}{'порог':>8}{'ROI (ничья = возврат)':>26}{'ROI (ничья = проигрыш)':>26}")
+        for pay in (0.80, 0.85, 0.90, 0.95):
+            wr = w / n
+            roi_refund = wr * pay - (1 - wr)
+            roi_loss = p_eff * pay - (1 - p_eff)
+            print(f"    {100 * pay:<9.0f}%{100 / (1 + pay):>7.2f}%{100 * roi_refund:>25.1f}%{100 * roi_loss:>25.1f}%")
     print("\nКак читать: на ЗАВЕДОМО случайных данных (проверено на 12 рядах) результат «уверенных» колеблется примерно от 49.3% до 51.8%,"
           " потому что окна ставок перекрываются; поэтому отклонения меньше 1.5–2 п.п. ничего не значат."
           "\nЕсли везде около 50%, то цена непредсказуема: на ней нельзя выигрывать ни умным, ни простым ботом.")
