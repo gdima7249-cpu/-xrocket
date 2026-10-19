@@ -30,11 +30,24 @@ def main():
     print("Подсказка: токен — длинная строка (обычно 30+ символов) без пробелов и кавычек; App ID — короче.")
     if not token or not app_id:
         raise SystemExit("Заполните DERIV_TOKEN и DERIV_APP_ID в файле .env")
-    try:
-        data = fetch(token, app_id)
-    except Exception as e:  # noqa: BLE001
-        body = getattr(e, "read", lambda: b"")().decode(errors="ignore")[:300]
-        raise SystemExit(f"Запрос не удался: {type(e).__name__} {body}")
+    data = None
+    variants = [("с Deriv-App-ID", token, app_id), ("без Deriv-App-ID", token, None)]
+    if "_" not in token[:5]:
+        variants.append(("токен без префикса до первого «_»", token.split("_", 1)[-1], app_id))
+    for name, tk, aid in variants:
+        hdr = {"Authorization": f"Bearer {tk}", "User-Agent": "Mozilla/5.0"}
+        if aid:
+            hdr["Deriv-App-ID"] = aid
+        try:
+            with urllib.request.urlopen(urllib.request.Request(URL, headers=hdr), timeout=30) as r:
+                data = json.loads(r.read().decode())
+                print(f"[{name}] OK {r.status}")
+                break
+        except Exception as e:  # noqa: BLE001
+            body = getattr(e, "read", lambda: b"")().decode(errors="ignore")[:200]
+            print(f"[{name}] ошибка {getattr(e, 'code', '')}: {body}")
+    if data is None:
+        raise SystemExit("Ни один вариант не подошёл — пришлите эти строки ошибок.")
     items = data.get("data", data) if isinstance(data, dict) else data
     if isinstance(items, dict):
         items = items.get("accounts", [items])
