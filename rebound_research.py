@@ -18,6 +18,8 @@
 
   python rebound_research.py                         # 10 монет, 365 дней
   python rebound_research.py --days 730 --coins BTC,ETH,SOL
+  python rebound_research.py --days 730 --ago 365 --only drop1h   # НЕЗАВИСИМАЯ проверка на двух годах ДО последнего
+  python rebound_research.py --only drop1h --slip 0.002           # то же правило при проскальзывании 0.2% (как в обвал)
   python rebound_research.py --synthetic             # проверка кода без интернета (случайные цены: эффекта быть не должно)
 """
 import argparse
@@ -33,13 +35,14 @@ BAR_MS = 5 * 60 * 1000
 COINS = "BTC,ETH,SOL,XRP,DOGE,BNB,ADA,AVAX,LINK,LTC"
 
 
-def download_5m(symbol, days):
+def download_5m(symbol, days, ago=0):
+    """5-минутные свечи за days дней, заканчивающиеся ago дней назад (ago=365 — год, предшествующий последнему)."""
     import requests
     os.makedirs(CACHE, exist_ok=True)
-    path = f"{CACHE}/{symbol}_5m_{days}d.csv"
-    if os.path.exists(path) and time.time() - os.path.getmtime(path) < 12 * 3600:
+    path = f"{CACHE}/{symbol}_5m_{days}d.csv" if not ago else f"{CACHE}/{symbol}_5m_{days}d_ago{ago}.csv"
+    if os.path.exists(path) and (ago or time.time() - os.path.getmtime(path) < 12 * 3600):
         return pd.read_csv(path)
-    end = int(time.time() * 1000)
+    end = int(time.time() * 1000) - ago * 86400 * 1000
     since = end - days * 86400 * 1000
     rows = []
     while since < end:
@@ -52,7 +55,7 @@ def download_5m(symbol, days):
                 if attempt == 3:
                     raise
                 time.sleep(2 ** attempt)
-        batch = r.json()
+        batch = [x for x in r.json() if x[0] < end]
         if not batch:
             break
         rows += batch
@@ -120,6 +123,8 @@ def main():
     ap.add_argument("--days", type=int, default=365)
     ap.add_argument("--fee", type=float, default=0.0004, help="комиссия за сторону (0.0004 = 0.04%, фьючерсы Binance, тейкер)")
     ap.add_argument("--slip", type=float, default=0.0002, help="проскальзывание за сторону")
+    ap.add_argument("--ago", type=int, default=0, help="сдвиг конца периода в прошлое, дней (365 — проверка на предыдущих годах)")
+    ap.add_argument("--only", default="", help="проверить только события-покупки после падений с выходом 1ч (быстрее): --only drop1h")
     ap.add_argument("--synthetic", action="store_true")
     a = ap.parse_args()
     cost = 2 * (a.fee + a.slip)
@@ -127,7 +132,7 @@ def main():
     data = {}
     for i, s in enumerate(a.coins.split(",")):
         try:
-            df = synthetic_5m(a.days, i) if a.synthetic else download_5m(s + "USDT", a.days)
+            df = synthetic_5m(a.days, i) if a.synthetic else download_5m(s + "USDT", a.days, a.ago)
             if len(df) > 1000:
                 data[s] = df
                 print(f"{s}: {len(df)} свечей")
@@ -143,10 +148,12 @@ def main():
     print(f"  {'событие':<24}{'выход':>7}{'сделок':>8}{'дней':>6}{'угадано':>9}{'в среднем':>11}{'случ.':>8}"
           f"{'t (дни)':>9}{'1-я пол.':>10}{'2-я пол.':>10}")
     rows = []
-    for direction, name in ((-1, "падение"), (1, "рост")):
+    dirs = ((-1, "падение"),) if a.only == "drop1h" else ((-1, "падение"), (1, "рост"))
+    holds = ((12, "1ч"),) if a.only == "drop1h" else ((3, "15м"), (12, "1ч"), (48, "4ч"))
+    for direction, name in dirs:
         for k, kname in ((1, "5м"), (3, "15м"), (6, "30м")):
             for thr in (0.01, 0.02, 0.03, 0.05):
-                for hold, hname in ((3, "15м"), (12, "1ч"), (48, "4ч")):
+                for hold, hname in holds:
                     T, R, B = [], [], []
                     for s, df in data.items():
                         t, r = events(df, k, thr, hold, direction)
