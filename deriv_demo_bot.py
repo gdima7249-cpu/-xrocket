@@ -1,8 +1,9 @@
 """Бот «вверх/вниз» для ДЕМО-счёта Deriv через официальное API (WebSocket): сигналы модели по реальным ценам Binance -> ставка на демо.
 
 ТОЛЬКО ДЕМО. Бот сразу после подключения проверяет, что счёт виртуальный (is_virtual = 1); на реальном счёте он останавливается.
-Режима реальных денег в нём нет сознательно. Токен создаётся в настройках Deriv (API token) на ДЕМО-счёте с правами Read и Trade;
-хранится только в .env (DERIV_TOKEN=...), никому не присылайте.
+Режима реальных денег в нём нет сознательно. Подключение (новый API Deriv): токен (Personal Access Token или OAuth) с правом trade + НОМЕР ДЕМО-счёта (DERIV_ACCOUNT_ID).
+Бот запрашивает одноразовый пароль (OTP) для этого счёта и открывает WebSocket; если адрес не содержит /ws/demo, он останавливается.
+Заголовок Deriv-App-ID нужен для токена PAT (DERIV_APP_ID). Всё хранится только в .env, токен никому не присылайте.
 
 Сигналы: та же модель (градиентный бустинг), что в signal_bot.py. Торгуем только крипту, которая есть на Deriv (BTC/USD, ETH/USD, ...),
 по настоящим ценам; синтетические индексы (генерируются случайно) и OTC-подобные активы не используются.
@@ -29,18 +30,43 @@ import config  # noqa: F401  (подгружает .env)
 import signal_bot as S
 
 TOKEN = os.getenv("DERIV_TOKEN", "")
-APP_ID = os.getenv("DERIV_APP_ID", "1089")
-WS_URL = os.getenv("DERIV_WS_URL", "wss://ws.derivws.com/websockets/v3")
+APP_ID = os.getenv("DERIV_APP_ID", "")
+ACCOUNT_ID = os.getenv("DERIV_ACCOUNT_ID", "")            # номер ДЕМО-счёта (в личном кабинете Deriv)
+OTP_URL = "https://api.derivws.com/trading/v1/options/accounts/{account}/otp"
+WS_URL = os.getenv("DERIV_WS_URL", "wss://ws.derivws.com/websockets/v3")        # старая схема, если не задан DERIV_ACCOUNT_ID
 LOG = "deriv_log.csv"
 SYMBOLS = {"BTC": "cryBTCUSD", "ETH": "cryETHUSD", "LTC": "cryLTCUSD", "BCH": "cryBCHUSD"}   # крипта на Deriv (проверьте список у себя)
+
+
+def is_demo_url(url):
+    """Адрес WebSocket, выданный для ДЕМО-счёта, содержит /ws/demo (в документации Deriv: .../options/ws/demo?otp=...)."""
+    return "/ws/demo" in url.split("?")[0]
+
+
+def get_demo_ws_url(token, app_id, account_id, post=None):
+    """Просит у Deriv одноразовый пароль (OTP) для счёта и возвращает готовый адрес WebSocket. Не демо-адрес отвергается."""
+    import requests
+    post = post or requests.post
+    headers = {"Authorization": f"Bearer {token}"}
+    if app_id:
+        headers["Deriv-App-ID"] = app_id
+    r = post(OTP_URL.format(account=account_id), headers=headers, timeout=20)
+    if r.status_code != 200:
+        raise SystemExit(f"Deriv не выдал OTP (код {r.status_code}): {r.text[:200]}\nПроверьте токен, номер счёта (DERIV_ACCOUNT_ID) и "
+                         "Deriv-App-ID (DERIV_APP_ID) — токен не показывайте никому.")
+    url = r.json()["data"]["url"]
+    if not is_demo_url(url):
+        raise SystemExit("Адрес WebSocket НЕ демо (нет /ws/demo). Бот работает только на демо-счёте. Укажите номер ДЕМО-счёта в DERIV_ACCOUNT_ID.")
+    return url
 
 
 class DerivClient:
     """Минимальный клиент WebSocket API Deriv: запрос -> ответ с тем же req_id."""
 
-    def __init__(self, app_id):
+    def __init__(self, app_id, url=None):
         import websocket
-        url = f"{WS_URL}?app_id={app_id}" if "?" not in WS_URL else WS_URL
+        self.preauth = bool(url)                                          # адрес с OTP уже авторизован: отдельный authorize не нужен
+        url = url or (f"{WS_URL}?app_id={app_id or '1089'}" if "?" not in WS_URL else WS_URL)
         try:
             self.ws = websocket.create_connection(url, timeout=30)
         except Exception as e:  # noqa: BLE001
@@ -67,9 +93,17 @@ class Trader:
         self.base_stake, self.unit, self.martingale = stake, unit, martingale
         self.max_stake = max_stake or stake * 64
         self.max_trades_day, self.max_loss = max_trades_day, max_loss
-        a = self.c.call({"authorize": TOKEN})["authorize"]
-        if not a.get("is_virtual"):
-            raise SystemExit("Это НЕ демо-счёт (is_virtual=0). Бот работает только на демо. Создайте токен на демо-счёте Deriv.")
+        if getattr(self.c, "preauth", False):                                # демо-адрес уже проверен в get_demo_ws_url
+            a = {"loginid": ACCOUNT_ID or "demo", "currency": "USD", "balance": 0}
+            try:
+                bal = self.c.call({"balance": 1})["balance"]
+                a.update(currency=bal.get("currency", "USD"), balance=bal.get("balance", 0), loginid=bal.get("loginid", a["loginid"]))
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            a = self.c.call({"authorize": TOKEN})["authorize"]
+            if not a.get("is_virtual"):
+                raise SystemExit("Это НЕ демо-счёт (is_virtual=0). Бот работает только на демо.")
         self.currency, self.balance0 = a.get("currency", "USD"), float(a.get("balance", 0))
         self.open, self.done, self.day_trades, self.day = {}, [], 0, datetime.now().date()
         self.halted = False
@@ -184,6 +218,22 @@ def selftest():
     t3 = Trader(FakeClient(), 1, 5, 2, 20, log=lambda *a: None)
     ok.append(("дневной лимит ставок", t3.place("BTC", 1, 1.0) and t3.place("BTC", 1, 1.0) and not t3.place("BTC", 1, 1.0)))
     ok.append(("журнал в CSV создан", os.path.exists(LOG)))
+
+    class Resp:
+        def __init__(self, code, data): self.status_code, self._d, self.text = code, data, str(data)
+        def json(self): return self._d
+    url_ok = get_demo_ws_url("t", "1", "DOT1", post=lambda *a_, **k_: Resp(200, {"data": {"url": "wss://api.derivws.com/trading/v1/options/ws/demo?otp=x"}}))
+    ok.append(("демо-адрес из OTP принимается", url_ok.endswith("otp=x") and is_demo_url(url_ok)))
+    try:
+        get_demo_ws_url("t", "1", "CR1", post=lambda *a_, **k_: Resp(200, {"data": {"url": "wss://api.derivws.com/trading/v1/options/ws/real?otp=x"}}))
+        ok.append(("не демо-адрес отвергается", False))
+    except SystemExit:
+        ok.append(("не демо-адрес отвергается", True))
+    try:
+        get_demo_ws_url("t", "1", "X", post=lambda *a_, **k_: Resp(401, {"errors": []}))
+        ok.append(("ошибка авторизации даёт понятное сообщение", False))
+    except SystemExit:
+        ok.append(("ошибка авторизации даёт понятное сообщение", True))
     tm = Trader(FakeClient(outcomes=["lost", "lost", "won", "lost"]), 2, 5, 10 ** 9, 1000, log=lambda *a: None, unit="t", martingale=2, max_stake=8)
     stakes = []
     for _ in range(4):
@@ -222,6 +272,13 @@ def run_auto(trader, symbol, mode, total, sleep=time.sleep, rnd=None, log=print,
     log("ИТОГ: " + trader.report())
 
 
+def connect():
+    """Новая схема Deriv: токен + номер демо-счёта -> OTP -> WebSocket (только демо). Старая схема — если DERIV_ACCOUNT_ID не задан."""
+    if ACCOUNT_ID:
+        return DerivClient(APP_ID, url=get_demo_ws_url(TOKEN, APP_ID, ACCOUNT_ID))
+    return DerivClient(APP_ID)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pairs", default="BTC,ETH")
@@ -243,16 +300,16 @@ def main():
     if a.selftest:
         selftest()
     if not TOKEN:
-        raise SystemExit("Впишите DERIV_TOKEN в .env (токен ДЕМО-счёта с правами Read и Trade; никому его не присылайте).")
+        raise SystemExit("Впишите DERIV_TOKEN в .env (токен с правом trade; никому его не присылайте) и DERIV_ACCOUNT_ID — номер ДЕМО-счёта.")
     if a.mode != "model":
-        trader = Trader(DerivClient(APP_ID), a.stake, a.expiry, 10 ** 9, a.max_loss, unit=a.unit, martingale=a.martingale, max_stake=a.max_stake)
+        trader = Trader(connect(), a.stake, a.expiry, 10 ** 9, a.max_loss, unit=a.unit, martingale=a.martingale, max_stake=a.max_stake)
         print(f"Автономные ставки на ДЕМО: режим {a.mode}, символ {a.symbol}, срок {a.expiry}{a.unit}, ставка {a.stake}, всего {a.total}. Остановка: Ctrl+C.")
         run_auto(trader, a.symbol, a.mode, a.total)
         return
     pairs = [p for p in a.pairs.split(",") if p in SYMBOLS]
     if not pairs:
         raise SystemExit(f"Поддерживаемые монеты: {', '.join(SYMBOLS)}")
-    trader = Trader(DerivClient(APP_ID), a.stake, a.expiry, a.max_trades_day, a.max_loss)
+    trader = Trader(connect(), a.stake, a.expiry, a.max_trades_day, a.max_loss)
     model, thr = S.train(pairs, a.days, a.expiry, a.top)
     print("Работает на ДЕМО. Остановка: Ctrl+C.")
     last_min, last_report = 0, time.time()
