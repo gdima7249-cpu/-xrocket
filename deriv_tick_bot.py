@@ -95,7 +95,7 @@ def payout_check(symbols, expiry, unit):
         for ct in ("CALL", "PUT"):
             try:
                 pr = trader.c.call({"proposal": 1, "amount": 1, "basis": "stake", "contract_type": ct, "currency": trader.currency,
-                                    "duration": expiry, "duration_unit": unit, "symbol": sym})["proposal"]
+                                    "duration": expiry, "duration_unit": unit, "underlying_symbol": sym})["proposal"]
                 pay = float(pr["payout"]) / float(pr["ask_price"]) - 1
                 cells.append(f"{100 * pay:.1f}%")
             except Exception as e:  # noqa: BLE001
@@ -114,7 +114,10 @@ def payout_check(symbols, expiry, unit):
     if errs:
         sym = next(iter(errs))
         try:
-            cf = trader.c.call({"contracts_for": sym, "currency": trader.currency})
+            try:
+                cf = trader.c.call({"contracts_for": sym})
+            except Exception:  # noqa: BLE001
+                cf = trader.c.call({"contracts_for": 1, "underlying_symbol": sym})
             av = cf.get("contracts_for", cf).get("available", [])
             seen = sorted({(c.get("contract_type"), c.get("min_contract_duration"), c.get("max_contract_duration")) for c in av})
             print(f"\nДоступные контракты для {sym} (тип, мин. срок, макс. срок), первые 15:")

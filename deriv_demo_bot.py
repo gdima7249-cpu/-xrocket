@@ -119,7 +119,7 @@ class Trader:
             return False
         sym = symbol or SYMBOLS[base]
         prop = self.c.call({"proposal": 1, "amount": self.stake, "basis": "stake", "contract_type": "CALL" if direction > 0 else "PUT",
-                            "currency": self.currency, "duration": self.expiry, "duration_unit": self.unit, "symbol": sym})["proposal"]
+                            "currency": self.currency, "duration": self.expiry, "duration_unit": self.unit, "underlying_symbol": sym})["proposal"]
         buy = self.c.call({"buy": prop["id"], "price": float(prop["ask_price"])})["buy"]
         payout = float(prop.get("payout", 0))
         self.open[buy["contract_id"]] = {"base": base, "dir": direction, "t": time.time(), "entry": entry_price,
