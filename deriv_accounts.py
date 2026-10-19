@@ -9,7 +9,7 @@ import urllib.request
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    load_dotenv(encoding="utf-8-sig")
 except Exception:  # noqa: BLE001
     pass
 
@@ -24,7 +24,10 @@ def fetch(token, app_id):
 
 
 def main():
-    token, app_id = os.getenv("DERIV_TOKEN", ""), os.getenv("DERIV_APP_ID", "")
+    token = os.getenv("DERIV_TOKEN", "").strip().strip("\"'").strip()
+    app_id = os.getenv("DERIV_APP_ID", "").strip().strip("\"'").strip()
+    print(f"Токен: длина {len(token)}, начинается с «{token[:4]}…» (сам токен не показываем); App ID: длина {len(app_id)}.")
+    print("Подсказка: токен — длинная строка (обычно 30+ символов) без пробелов и кавычек; App ID — короче.")
     if not token or not app_id:
         raise SystemExit("Заполните DERIV_TOKEN и DERIV_APP_ID в файле .env")
     try:
