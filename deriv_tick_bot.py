@@ -89,6 +89,7 @@ def payout_check(symbols, expiry, unit):
     trader = B.Trader(B.connect(), 1.0, expiry, 10 ** 9, 10 ** 9, unit=unit)
     print(f"Выплата по Rise/Fall на {expiry}{'т' if unit == 't' else ' мин'} (ставка 1 {trader.currency}); ничего не покупается:\n")
     print(f"  {'символ':<14}{'CALL (вверх)':>16}{'PUT (вниз)':>16}   порог безубыточности")
+    errs = {}
     for sym in symbols:
         cells = []
         for ct in ("CALL", "PUT"):
@@ -99,8 +100,7 @@ def payout_check(symbols, expiry, unit):
                 cells.append(f"{100 * pay:.1f}%")
             except Exception as e:  # noqa: BLE001
                 cells.append("—")
-                if DEBUG:
-                    print("   ", sym, ct, str(e)[:150])
+                errs.setdefault(sym, str(e)[:300])
         be = ""
         try:
             p0 = float(cells[0].rstrip("%")) / 100
@@ -108,7 +108,20 @@ def payout_check(symbols, expiry, unit):
         except ValueError:
             pass
         print(f"  {sym:<14}{cells[0]:>16}{cells[1]:>16}   {be}")
-    print("\n«—» значит, что Deriv не принял запрос (неизвестный символ или недоступный срок для этого актива).")
+    print("\n«—» значит, что Deriv не принял запрос. Ответ Deriv:")
+    for sym, e in errs.items():
+        print(f"  {sym}: {e}")
+    if errs:
+        sym = next(iter(errs))
+        try:
+            cf = trader.c.call({"contracts_for": sym, "currency": trader.currency})
+            av = cf.get("contracts_for", cf).get("available", [])
+            seen = sorted({(c.get("contract_type"), c.get("min_contract_duration"), c.get("max_contract_duration")) for c in av})
+            print(f"\nДоступные контракты для {sym} (тип, мин. срок, макс. срок), первые 15:")
+            for row in seen[:15]:
+                print("  ", row)
+        except Exception as e:  # noqa: BLE001
+            print(f"contracts_for для {sym} тоже не сработал: {str(e)[:200]}")
 
 
 def run_live(trader, symbol, model, thr, vol, ahead, total, ticks, log=print, report_every=25, max_ticks=None):
