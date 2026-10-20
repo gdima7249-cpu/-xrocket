@@ -12,9 +12,9 @@
 Чтобы понять, работает ли это у ВАШЕГО брокера, записывайте каждую ставку в журнал (бот спросит итог через час, можно пропустить):
 rebound_alerts.csv. Для вывода нужно 50–100 ставок.
 
-  python rebound_alerts.py                           # монеты по умолчанию, оба правила
+  python rebound_alerts.py                           # монеты по умолчанию, правило B
   python rebound_alerts.py --coins BTC,ETH,SOL,XRP   # только пары, которые есть у вашего брокера
-  python rebound_alerts.py --rules B
+  python rebound_alerts.py --rules A,B               # оба правила (на одном обвале может прийти два сигнала по одной монете)
   python rebound_alerts.py --report
 """
 import argparse
@@ -57,7 +57,7 @@ def report():
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--coins", default="BTC,ETH,SOL,XRP,DOGE,BNB,ADA,AVAX,LINK,LTC,DOT,TRX")
-    ap.add_argument("--rules", default="A,B")
+    ap.add_argument("--rules", default="B")
     ap.add_argument("--report", action="store_true")
     a = ap.parse_args()
     if a.report:
