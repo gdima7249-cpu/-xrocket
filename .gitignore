@@ -19,3 +19,6 @@ rebound_paper.csv
 rebound_bot.json
 rebound_bot.json.tmp
 rebound_bot.csv
+rebound_alerts.csv
+rebound_alerts_state.json
+rebound_alerts_state.json.tmp
