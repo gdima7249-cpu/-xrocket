@@ -23,7 +23,7 @@ import time
 from datetime import datetime, timezone
 
 API = "https://data-api.binance.vision/api/v3/klines"
-COINS = "BTC,ETH,SOL,XRP,DOGE,BNB,ADA,AVAX,LINK,LTC"
+COINS = "BTC,ETH,SOL,XRP,DOGE,BNB,ADA,AVAX,LINK,LTC,DOT,TRX,ATOM,UNI,XLM,ETC,BCH,FIL,NEAR,AAVE"
 BAR = 300                                                         # секунд в 5-минутной свече
 HOLD = 12                                                         # свечей удержания (1 час)
 COST = 0.0012
