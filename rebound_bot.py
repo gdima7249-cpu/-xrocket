@@ -10,6 +10,9 @@
 Ключи (только в .env, никогда в чат): BYBIT_API_KEY, BYBIT_API_SECRET. Права ключа: только «Спот — торговля».
 НИКОГДА не давайте ключу право на вывод средств. Лучше привязать ключ к IP сервера.
 
+Комиссия спота Bybit — около 0.1% за сторону (0.2% на сделку, больше, чем в исследовании): перевес правила B по истории
++0.4…1% на сделку до этой поправки, после неё — тоньше; правило A на споте почти не окупается.
+
 Ограничители: сумма на сделку (--stake, по умолчанию 5 USDT), не больше --max-open позиций одновременно (по умолчанию 2),
 стоп-кран по суммарному убытку (--max-loss, USDT): после него новых покупок нет. Каждая сделка — в rebound_bot.csv с реальными
 ценами исполнения и ценой сигнала (так видно проскальзывание). Состояние — rebound_bot.json: при перезапуске бот продолжит
@@ -19,6 +22,7 @@
   python rebound_bot.py --selftest              # проверка логики без биржи
   python rebound_bot.py --check                 # подключиться (демо), показать баланс и минимальные суммы ордеров, ничего не покупать
   python rebound_bot.py                         # работать на демо-счёте
+  python rebound_bot.py --top 40                # следить за 40 самыми торгуемыми монетами Bybit (больше сигналов)
   python rebound_bot.py --report
 """
 import argparse
@@ -48,6 +52,31 @@ def make_exchange(env):
     if env == "demo":
         ex.enable_demo_trading(True)
     return ex
+
+
+STABLE = {"USDC", "USDE", "FDUSD", "DAI", "TUSD", "BUSD", "USDD", "PYUSD", "USD1", "EUR", "EURC", "EURT", "WBTC", "STETH",
+          "WETH", "XAUT", "PAXG", "USTC"}
+
+
+def top_coins(ex, n, min_volume, always=()):
+    """n самых торгуемых монет к USDT на споте (по обороту за сутки), без стейблкоинов, обёрток и токенов с плечом."""
+    tickers = ex.fetch_tickers()
+    rows = []
+    for sym, t in tickers.items():
+        if not sym.endswith("/USDT") or ":" in sym:
+            continue
+        base = sym.split("/")[0]
+        if base in STABLE or base.endswith(("3L", "3S", "2L", "2S", "5L", "5S", "UP", "DOWN")):
+            continue
+        vol = float(t.get("quoteVolume") or 0)
+        if vol >= min_volume:
+            rows.append((vol, base))
+    rows.sort(reverse=True)
+    out = [b for _, b in rows[:n]]
+    for b in always:                                                 # монеты, по которым уже открыта позиция, не теряем
+        if b not in out:
+            out.append(b)
+    return out
 
 
 class Bot:
@@ -270,7 +299,14 @@ def selftest():
     ex.bars["SOL/USDT"].append([(t0 + 9 * BAR) * 1000, 85, 85, 85, 85, 0])
     bot2.tick(t0 + 10 * BAR + 1)
     halted = any("стоп-кран" in m for m in msgs) and not bot2.st["open"]
-    checks = [("покупка по сигналу B (−3.5% за 15 мин)", bought), ("лимит одновременных позиций соблюдается", skipped),
+    class TEx:
+        def fetch_tickers(self):
+            return {"BTC/USDT": {"quoteVolume": 9e8}, "SOL/USDT": {"quoteVolume": 2e8}, "USDC/USDT": {"quoteVolume": 5e8},
+                    "BTC3L/USDT": {"quoteVolume": 1e8}, "PEPE/USDT": {"quoteVolume": 1e6}, "ETH/USDC": {"quoteVolume": 1e9},
+                    "XRP/USDT": {"quoteVolume": 7e7}}
+    picked = top_coins(TEx(), 2, 5e6, always=["DOGE"])
+    top_ok = picked == ["BTC", "SOL", "DOGE"]
+    checks = [("выбор самых торгуемых монет без стейблов, плеча и мелочи", top_ok), ("покупка по сигналу B (−3.5% за 15 мин)", bought), ("лимит одновременных позиций соблюдается", skipped),
               ("свеча обрабатывается один раз", no_dup), ("продажа через час, прибыль посчитана", sold),
               ("состояние сохраняется между запусками", persisted), ("стоп-кран по убытку блокирует покупки", halted),
               ("отчёт строится", "Сделок 2" in bot2.report())]
@@ -287,6 +323,8 @@ def main():
     ap.add_argument("--env", default=os.getenv("BYBIT_ENV", "demo"), choices=["demo", "real"])
     ap.add_argument("--i-understand-real-money", action="store_true")
     ap.add_argument("--coins", default=COINS)
+    ap.add_argument("--top", type=int, default=0, help="вместо --coins следить за N самыми торгуемыми монетами Bybit (например 40)")
+    ap.add_argument("--min-volume", type=float, default=5e6, help="с --top: минимальный оборот за сутки, USDT (по умолчанию 5 млн)")
     ap.add_argument("--rules", default="B")
     ap.add_argument("--stake", type=float, default=5.0, help="USDT на сделку")
     ap.add_argument("--max-open", type=int, default=2)
@@ -306,6 +344,9 @@ def main():
         raise SystemExit("Нет BYBIT_API_KEY / BYBIT_API_SECRET в .env (ключ с правом только «Спот — торговля», без вывода).")
     ex = make_exchange(a.env)
     coins = a.coins.split(",")
+    if a.top:
+        coins = top_coins(ex, a.top, a.min_volume)
+        print(f"Самые торгуемые монеты Bybit (оборот ≥ {a.min_volume / 1e6:.0f} млн USDT за сутки): {len(coins)}")
     if a.check:
         ex.load_markets()
         bal = ex.fetch_balance()
@@ -323,8 +364,14 @@ def main():
     print(f"Bybit {'ДЕМО' if a.env == 'demo' else 'РЕАЛЬНЫЕ ДЕНЬГИ'}: правила {a.rules}, ставка {a.stake} USDT, до {a.max_open} позиций, "
           f"стоп-кран −{a.max_loss} USDT. Монеты: {', '.join(coins)}. Ctrl+C — стоп (открытые позиции продадутся при следующем запуске).")
     print(bot.report())
-    last_rep = time.time()
+    last_rep = last_top = time.time()
     while True:
+        if a.top and time.time() - last_top > 6 * 3600:                # список самых торгуемых обновляется раз в 6 часов
+            try:
+                bot.coins = top_coins(ex, a.top, a.min_volume, always=[p["coin"] for p in bot.st["open"]])
+            except Exception as e:  # noqa: BLE001
+                print(f"  не удалось обновить список монет: {type(e).__name__}")
+            last_top = time.time()
         try:
             bot.tick()
         except Exception as e:  # noqa: BLE001
