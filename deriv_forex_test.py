@@ -21,12 +21,23 @@ import deriv_ticks_test as T
 LAGS = 12
 
 
-def fetch_candles(symbol, total, gran=300, ws=None):
-    """5-минутные свечи (по 5000 за запрос, назад во времени), без дублей, по возрастанию времени: (время, close)."""
-    if ws is None:
+def fetch_candles(symbol, total, gran=300, ws=None, pause=2.0):
+    """5-минутные свечи (по 5000 за запрос, назад во времени), без дублей, по возрастанию времени: (время, close).
+    Deriv ограничивает частоту таких запросов: между запросами пауза, при упоре в лимит — ожидание и повтор.
+    Скачанное сохраняется в research_cache (при повторном запуске в течение суток берётся оттуда)."""
+    import os
+    os.makedirs("research_cache", exist_ok=True)
+    path = f"research_cache/DERIV_{symbol}_{gran}s_{total}.json"
+    if ws is None and os.path.exists(path) and time.time() - os.path.getmtime(path) < 86400:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        print(f"Свечи {symbol} взяты из кэша: {len(d['t'])}")
+        return np.array(d["t"]), np.array(d["c"])
+    own = ws is None
+    if own:
         import websocket
         ws = websocket.create_connection(T.WS_URL, timeout=30)
-    seen, end, req, stalled = {}, "latest", 0, 0
+    seen, end, req, stalled, waits = {}, "latest", 0, 0, 0
     try:
         while len(seen) < total and req < 200 and stalled < 3:
             ws.send(json.dumps({"ticks_history": symbol, "style": "candles", "granularity": gran, "count": 5000,
@@ -34,7 +45,14 @@ def fetch_candles(symbol, total, gran=300, ws=None):
             req += 1
             msg = json.loads(ws.recv())
             if msg.get("error"):
-                raise SystemExit(f"Deriv API: {msg['error'].get('message')} (проверьте символ, например frxGBPCAD)")
+                text = str(msg["error"].get("message", ""))
+                if "rate limit" in text.lower() and waits < 10:
+                    waits += 1
+                    wait = 30 * waits
+                    print(f"  Deriv просит подождать (лимит запросов), жду {wait} с... (уже скачано {len(seen)} свечей)")
+                    time.sleep(wait)
+                    continue
+                raise SystemExit(f"Deriv API: {text} (проверьте символ, например frxGBPCAD)")
             cs = msg.get("candles") or []
             if not cs:
                 break
@@ -43,15 +61,21 @@ def fetch_candles(symbol, total, gran=300, ws=None):
                 seen.setdefault(int(c["epoch"]), float(c["close"]))
             stalled = stalled + 1 if len(seen) - before < len(cs) * 0.5 else 0
             end = min(int(c["epoch"]) for c in cs) - 1
-            time.sleep(0.2)
+            print(f"  скачано {len(seen)} свечей...")
+            time.sleep(pause)
     finally:
         try:
             ws.close()
         except Exception:  # noqa: BLE001
             pass
     ts = sorted(seen)
+    if not ts:
+        raise SystemExit("Свечей нет")
     print(f"Свечей: {len(ts)} (запросов {req}); период {time.strftime('%Y-%m-%d', time.gmtime(ts[0]))} … "
-          f"{time.strftime('%Y-%m-%d', time.gmtime(ts[-1]))}" if ts else "Свечей нет")
+          f"{time.strftime('%Y-%m-%d', time.gmtime(ts[-1]))}")
+    if own:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"t": ts, "c": [seen[t] for t in ts]}, f)
     return np.array(ts), np.array([seen[t] for t in ts])
 
 
