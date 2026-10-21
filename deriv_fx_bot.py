@@ -79,8 +79,9 @@ class Public:
             return list(FALLBACK)
 
 
-def payout_15m(client, currency, symbol):
-    pr = client.call({"proposal": 1, "amount": 10, "basis": "stake", "contract_type": "CALL", "currency": currency,
+def payout_15m(client, currency, symbol, stake=10.0):
+    """Выплата в долях ставки для CALL на 15 минут — на ТОЙ сумме, которую бот реально ставит (на малых ставках она бывает ниже)."""
+    pr = client.call({"proposal": 1, "amount": stake, "basis": "stake", "contract_type": "CALL", "currency": currency,
                       "duration": 15, "duration_unit": "m", "underlying_symbol": symbol})["proposal"]
     return float(pr["payout"]) / float(pr["ask_price"]) - 1
 
@@ -107,7 +108,7 @@ class FxBot:
         self.pairs, self.pays = [], {}
         for s in symbols:
             try:
-                p = payout_15m(self.tr.c, self.tr.currency, s)
+                p = payout_15m(self.tr.c, self.tr.currency, s, self.tr.stake)
             except Exception:  # noqa: BLE001
                 continue
             self.pays[s] = p
@@ -144,7 +145,7 @@ class FxBot:
                 self.log(f"  СИГНАЛ {s} ({z:.1f} разброса), но по паре уже есть открытая ставка — пропуск")
                 continue
             try:
-                p = payout_15m(self.tr.c, self.tr.currency, s)
+                p = payout_15m(self.tr.c, self.tr.currency, s, self.tr.stake)
             except Exception as e:  # noqa: BLE001
                 self.log(f"  СИГНАЛ {s}, но цену ставки получить не удалось: {str(e)[:80]}")
                 continue
