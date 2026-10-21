@@ -105,11 +105,12 @@ class FxBot:
         self.vol, self.last, self.pairs, self.pays = {}, {}, [], {}
 
     def refresh_pairs(self, symbols):
-        self.pairs, self.pays = [], {}
+        self.pairs, self.pays, self.errors = [], {}, {}
         for s in symbols:
             try:
                 p = payout_15m(self.tr.c, self.tr.currency, s, self.tr.stake)
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                self.errors[s] = str(e)[:160]
                 continue
             self.pays[s] = p
             if p >= self.min_payout:
@@ -230,6 +231,10 @@ def main():
     print(f"Выплаты на 15 минут (CALL) по {len(pays)} парам:")
     for s, p in sorted(pays.items(), key=lambda x: -x[1]):
         print(f"  {s:<12}{100 * p:5.0f}%   порог {100 / (1 + p):.1f}%" + ("   ← берём" if s in bot.pairs else ""))
+    if bot.errors:
+        print(f"\nНе удалось получить выплату по {len(bot.errors)} парам. Ответ Deriv (первые 3):")
+        for s, e in list(bot.errors.items())[:3]:
+            print(f"  {s}: {e}")
     if a.scan:
         return
     if not bot.pairs:
