@@ -9,6 +9,7 @@
   python deriv_forex_test.py --symbol frxGBPCAD
   python deriv_forex_test.py --symbol frxEURUSD --payout
   python deriv_forex_test.py --symbol frxEURUSD,frxGBPUSD,frxUSDJPY,frxAUDUSD,frxUSDCAD --payout   # несколько пар + общий итог
+  python deriv_forex_test.py --symbol frxGBPNZD,frxEURNZD,frxGBPAUD --delay 1   # вход на 5 минут позже сигнала
   python deriv_forex_test.py --synthetic              # случайные цены: везде должно быть около 50%
 """
 import argparse
@@ -80,15 +81,19 @@ def fetch_candles(symbol, total, gran=300, ws=None, pause=2.0):
     return np.array(ts), np.array([seen[t] for t in ts])
 
 
+DELAY = 0
+
+
 def features(c, h):
     """X — последние LAGS изменений (в долях обычного разброса) и их суммы; y — цена через h свечей выше текущей (1) или ниже (0).
     Свечи, у которых следующие h свечей пересекают перерыв в торговле (выходные), отбрасываются."""
     r = np.diff(np.log(c))
     vol = np.std(r) + 1e-12
     X, Y, Z = [], [], []
-    for t in range(LAGS + 48, len(r) - h):
+    d = DELAY
+    for t in range(LAGS + 48, len(r) - h - d):
         w = r[t - LAGS:t] / vol
-        fut = c[t + h] - c[t]
+        fut = c[t + d + h] - c[t + d]                               # вход через d свечей после сигнала
         if fut == 0:
             continue
         X.append(list(w) + [w[-3:].sum(), w[-6:].sum(), w.sum(), r[t - 48:t].std() / vol])
@@ -175,8 +180,13 @@ def main():
     ap.add_argument("--symbol", default="frxGBPCAD", help="одна пара или несколько через запятую: frxEURUSD,frxUSDJPY,...")
     ap.add_argument("--candles", type=int, default=60000, help="сколько 5-минутных свечей скачать (60000 ≈ 10 месяцев торговли)")
     ap.add_argument("--payout", action="store_true", help="спросить у Deriv реальную выплату (нужен .env демо-счёта)")
+    ap.add_argument("--delay", type=int, default=0, help="вход на столько 5-минутных свечей позже сигнала (проверка на «выбросы»)")
     ap.add_argument("--synthetic", action="store_true")
     a = ap.parse_args()
+    global DELAY
+    DELAY = a.delay
+    if a.delay:
+        print(f"ВХОД С ЗАДЕРЖКОЙ: через {5 * a.delay} мин после сигнала (по цене закрытия той свечи).")
     total = {}
     syms = a.symbol.split(",")
     for i, sym in enumerate(syms):

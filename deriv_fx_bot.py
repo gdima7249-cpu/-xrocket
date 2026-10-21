@@ -259,7 +259,9 @@ def main():
             return
         except Exception as e:  # noqa: BLE001
             print(f"  ошибка прохода: {type(e).__name__}: {str(e)[:120]}")
-        time.sleep(20)
+        # спим до ближайшего закрытия 5-минутной свечи (+3 с), но не дольше 20 с — чтобы и входить сразу, и проверять ставки
+        to_close = GRAN - (time.time() % GRAN) + 3
+        time.sleep(min(20, to_close))
 
 
 if __name__ == "__main__":
