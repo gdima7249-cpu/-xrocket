@@ -8,6 +8,7 @@
 
   python deriv_forex_test.py --symbol frxGBPCAD
   python deriv_forex_test.py --symbol frxEURUSD --payout
+  python deriv_forex_test.py --symbol frxEURUSD,frxGBPUSD,frxUSDJPY,frxAUDUSD,frxUSDCAD --payout   # несколько пар + общий итог
   python deriv_forex_test.py --synthetic              # случайные цены: везде должно быть около 50%
 """
 import argparse
@@ -131,22 +132,17 @@ def payouts(symbol, minutes):
     return out
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--symbol", default="frxGBPCAD")
-    ap.add_argument("--candles", type=int, default=60000, help="сколько 5-минутных свечей скачать (60000 ≈ 8 месяцев торговли)")
-    ap.add_argument("--payout", action="store_true", help="спросить у Deriv реальную выплату (нужен .env демо-счёта)")
-    ap.add_argument("--synthetic", action="store_true")
-    a = ap.parse_args()
-
-    if a.synthetic:
-        c = T.synthetic(a.candles)
+def run_one(symbol, candles, payout, synthetic, total):
+    """Проверка одной пары; добавляет результаты правила отката в total[срок] = [угадано, ставок, выплата]."""
+    if synthetic:
+        c = T.synthetic(candles)
     else:
-        _, c = fetch_candles(a.symbol, a.candles)
+        _, c = fetch_candles(symbol, candles)
     if len(c) < 5000:
-        raise SystemExit("Слишком мало свечей для проверки")
-    pays = payouts(a.symbol, [15, 30, 60]) if a.payout else {}
-    print(f"\n{a.symbol}: {len(c)} свечей. Доля угаданных на будущих кусках истории (4 куска).")
+        print(f"{symbol}: слишком мало свечей, пропуск")
+        return
+    pays = payouts(symbol, [15, 30, 60]) if payout else {}
+    print(f"\n{symbol}: {len(c)} свечей. Доля угаданных на будущих кусках истории (4 куска).")
     for h, mnt in ((3, 15), (6, 30), (12, 60)):
         X, Y, Z = features(c, h)
         res = walk(X, Y, Z, h)
@@ -158,16 +154,50 @@ def main():
         for name, parts in res.items():
             n = sum(m for _, m in parts)
             w = sum(int(v) for v, _ in parts)
+            if name.startswith("откат"):
+                t = total.setdefault(mnt, [0, 0, []])
+                t[0] += w
+                t[1] += n
+                if pay:
+                    t[2].append(pay)
             if not n:
                 print(f"  {name:<46} нет случаев")
                 continue
             p = w / n
             ci = 1.96 * np.sqrt(p * (1 - p) / n)
             per = " ".join(f"{100 * v / m:.1f}" for v, m in parts if m)
-            mark = ""
-            if be and p - ci > be:
-                mark = "  ← выше порога с запасом"
+            mark = "  ← выше порога с запасом" if be and p - ci > be else ""
             print(f"  {name:<46}{n:>7} ставок  {100 * p:5.1f}% ± {100 * ci:.1f}   [{per}]{mark}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--symbol", default="frxGBPCAD", help="одна пара или несколько через запятую: frxEURUSD,frxUSDJPY,...")
+    ap.add_argument("--candles", type=int, default=60000, help="сколько 5-минутных свечей скачать (60000 ≈ 10 месяцев торговли)")
+    ap.add_argument("--payout", action="store_true", help="спросить у Deriv реальную выплату (нужен .env демо-счёта)")
+    ap.add_argument("--synthetic", action="store_true")
+    a = ap.parse_args()
+    total = {}
+    syms = a.symbol.split(",")
+    for i, sym in enumerate(syms):
+        if i and not a.synthetic:
+            print("\n(пауза 60 с между парами, чтобы не упереться в лимит Deriv)")
+            time.sleep(60)
+        try:
+            run_one(sym, a.candles, a.payout, a.synthetic, total)
+        except SystemExit as e:
+            print(f"{sym}: {e}")
+    if len(syms) > 1:
+        print("\nОБЩИЙ ИТОГ правила «откат: падение >3 разбросов за 15м → вверх» по всем парам:")
+        for mnt, (w, n, pays) in sorted(total.items()):
+            if not n:
+                continue
+            p = w / n
+            ci = 1.96 * np.sqrt(p * (1 - p) / n)
+            be = 1 / (1 + float(np.mean(pays))) if pays else None
+            tail = (f"; средний порог {100 * be:.1f}% → " + ("ВЫШЕ порога с запасом" if p - ci > be else
+                    "не отличить от порога или ниже")) if be else ""
+            print(f"  {mnt} мин: {n} ставок, угадано {100 * p:.1f}% ± {100 * ci:.1f}{tail}")
     print("\nКак читать: чтобы ставки были в плюсе, «угадано» должно быть ВЫШЕ порога безубыточности с запасом больше погрешности"
           "\n(±) и держаться во всех кусках. Окна ставок перекрываются, поэтому настоящая погрешность ещё больше напечатанной.")
 
