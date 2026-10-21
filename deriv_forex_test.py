@@ -105,7 +105,8 @@ def features(c, h):
 def walk(X, Y, Z, h, folds=5):
     n = len(Y)
     edges = np.linspace(0, n, folds + 1).astype(int)
-    res = {"модель, все": [], "модель, уверенные 20%": [], "откат: падение >3 разбросов за 15м → вверх": [], "всегда вверх": []}
+    res = {"модель, все": [], "модель, уверенные 20%": [], "откат: падение >3 разбросов за 15м → вверх": [],
+           "откат: рост >3 разбросов за 15м → вниз": [], "всегда вверх": []}
     for k in range(1, folds):
         tr, te = slice(0, edges[k] - h), slice(edges[k], edges[k + 1])
         m = T.HistGradientBoostingClassifier(max_depth=3, max_iter=100, learning_rate=0.05, l2_regularization=5.0,
@@ -119,6 +120,8 @@ def walk(X, Y, Z, h, folds=5):
         res["модель, уверенные 20%"].append(((side[conf] == y[conf]).sum(), int(conf.sum())))
         dip = Z[te] <= -3 * np.sqrt(3)                              # падение больше 3 «обычных разбросов» за 15 мин
         res["откат: падение >3 разбросов за 15м → вверх"].append((int(y[dip].sum()), int(dip.sum())))
+        pump = Z[te] >= 3 * np.sqrt(3)                              # рост больше 3 разбросов за 15 мин → ставка вниз
+        res["откат: рост >3 разбросов за 15м → вниз"].append((int((1 - y[pump]).sum()), int(pump.sum())))
         res["всегда вверх"].append((int(y.sum()), len(y)))
     return res
 
@@ -160,7 +163,7 @@ def run_one(symbol, candles, payout, synthetic, total):
             n = sum(m for _, m in parts)
             w = sum(int(v) for v, _ in parts)
             if name.startswith("откат"):
-                t = total.setdefault(mnt, [0, 0, []])
+                t = total.setdefault((name, mnt), [0, 0, []])
                 t[0] += w
                 t[1] += n
                 if pay:
@@ -198,8 +201,8 @@ def main():
         except SystemExit as e:
             print(f"{sym}: {e}")
     if len(syms) > 1:
-        print("\nОБЩИЙ ИТОГ правила «откат: падение >3 разбросов за 15м → вверх» по всем парам:")
-        for mnt, (w, n, pays) in sorted(total.items()):
+        print("\nОБЩИЙ ИТОГ правил отката по всем парам:")
+        for (name, mnt), (w, n, pays) in sorted(total.items()):
             if not n:
                 continue
             p = w / n
@@ -207,7 +210,7 @@ def main():
             be = 1 / (1 + float(np.mean(pays))) if pays else None
             tail = (f"; средний порог {100 * be:.1f}% → " + ("ВЫШЕ порога с запасом" if p - ci > be else
                     "не отличить от порога или ниже")) if be else ""
-            print(f"  {mnt} мин: {n} ставок, угадано {100 * p:.1f}% ± {100 * ci:.1f}{tail}")
+            print(f"  {name[7:]:<34} {mnt} мин: {n} ставок, угадано {100 * p:.1f}% ± {100 * ci:.1f}{tail}")
     print("\nКак читать: чтобы ставки были в плюсе, «угадано» должно быть ВЫШЕ порога безубыточности с запасом больше погрешности"
           "\n(±) и держаться во всех кусках. Окна ставок перекрываются, поэтому настоящая погрешность ещё больше напечатанной.")
 
