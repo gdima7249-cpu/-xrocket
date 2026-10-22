@@ -24,6 +24,7 @@ import time
 from datetime import datetime
 
 import deriv_demo_bot as B
+import tg_notify
 
 PUBLIC_WS = os.getenv("DERIV_WS_URL", "wss://api.derivws.com/trading/v1/options/ws/public")
 GRAN = 300
@@ -263,6 +264,7 @@ def main():
     if not bot.pairs:
         raise SystemExit(f"Сейчас нет пар с выплатой ≥{100 * a.min_payout:.0f}% (рынок закрыт или выплаты снижены). Попробуйте позже.")
     print(f"\nРаботает на ДЕМО: {len(bot.pairs)} пар, ставка {a.stake}, лимит потерь {a.max_loss}. Ctrl+C — стоп.")
+    tg_notify.send(f"▶️ Deriv-бот (валюты) запущен на ДЕМО: {len(bot.pairs)} пар, ставка {a.stake}, срок {a.minutes} мин.")
     last_pairs = last_rep = time.time()
     reported = 0
     while True:
@@ -276,15 +278,18 @@ def main():
                 trader.poll()
             if trader.halted and not trader.open:
                 print("Лимит потерь достигнут, бот остановлен.\nИТОГ: " + trader.report())
+                tg_notify.send("⛔ Deriv-бот остановлен по лимиту потерь.\n" + trader.report())
                 return
             if not trader.halted:
                 bot.step()
             getattr(trader.c, "idle_ping", lambda: None)()
             if len(trader.done) >= reported + 25 or time.time() - last_rep > 6 * 3600:
                 print(datetime.now().strftime("[%H:%M] ") + trader.report())
+                tg_notify.send("📊 Deriv-бот (валюты): " + trader.report())
                 reported, last_rep = len(trader.done), time.time()
         except KeyboardInterrupt:
             print("\nИТОГ: " + trader.report())
+            tg_notify.send("⏹ Deriv-бот остановлен вручную.\n" + trader.report())
             return
         except Exception as e:  # noqa: BLE001
             print(f"  ошибка прохода: {type(e).__name__}: {str(e)[:120]}")
