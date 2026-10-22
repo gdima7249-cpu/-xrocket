@@ -223,9 +223,12 @@ def main():
     ap.add_argument("--candles", type=int, default=60000, help="сколько 5-минутных свечей скачать (60000 ≈ 10 месяцев торговли)")
     ap.add_argument("--payout", action="store_true", help="спросить у Deriv реальную выплату (нужен .env демо-счёта)")
     ap.add_argument("--delay", type=int, default=0, help="вход на столько 5-минутных свечей позже сигнала (проверка на «выбросы»)")
+    ap.add_argument("--preset", choices=["fx"], help="готовый список пар: fx — 9 валютных пар, на которых проверяли правило отката")
     ap.add_argument("--list", action="store_true", help="показать символы Deriv (индексы, сырьё, валюты) и выйти")
     ap.add_argument("--synthetic", action="store_true")
     a = ap.parse_args()
+    if a.preset == "fx":
+        a.symbol = "frxGBPNZD,frxEURNZD,frxGBPAUD,frxEURAUD,frxGBPJPY,frxEURJPY,frxEURUSD,frxGBPUSD,frxUSDJPY"
     if a.list:
         list_symbols()
         return
