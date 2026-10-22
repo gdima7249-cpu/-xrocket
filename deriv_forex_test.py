@@ -113,7 +113,8 @@ def walk(X, Y, Z, h, folds=5):
     n = len(Y)
     edges = np.linspace(0, n, folds + 1).astype(int)
     res = {"модель, все": [], "модель, уверенные 20%": [], "откат: падение >3 разбросов за 15м → вверх": [],
-           "откат: рост >3 разбросов за 15м → вниз": [], "всегда вверх": []}
+           "откат: рост >3 разбросов за 15м → вниз": [], "всегда вверх": [],
+           "откат, сила падения 3–4 → вверх": [], "откат, сила падения 4–5 → вверх": [], "откат, сила падения >5 → вверх": []}
     for k in range(1, folds):
         tr, te = slice(0, edges[k] - h), slice(edges[k], edges[k + 1])
         m = T.HistGradientBoostingClassifier(max_depth=3, max_iter=100, learning_rate=0.05, l2_regularization=5.0,
@@ -130,6 +131,10 @@ def walk(X, Y, Z, h, folds=5):
         pump = Z[te] >= 3 * np.sqrt(3)                              # рост больше 3 разбросов за 15 мин → ставка вниз
         res["откат: рост >3 разбросов за 15м → вниз"].append((int((1 - y[pump]).sum()), int(pump.sum())))
         res["всегда вверх"].append((int(y.sum()), len(y)))
+        zz = -Z[te] / np.sqrt(3)                                    # сила падения в тех же единицах, что печатает бот («−4.7 разброса»)
+        for lo, hi, name in ((3, 4, "3–4"), (4, 5, "4–5"), (5, 1e9, ">5")):
+            m = (zz >= lo) & (zz < hi)
+            res[f"откат, сила падения {name} → вверх"].append((int(y[m].sum()), int(m.sum())))
     return res
 
 
