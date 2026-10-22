@@ -103,8 +103,9 @@ def is_signal(closes, vol, k=3.0):
 
 
 class FxBot:
-    def __init__(self, pub, trader, min_payout, log=print):
+    def __init__(self, pub, trader, min_payout, log=print, max_open=0):
         self.pub, self.tr, self.min_payout, self.log = pub, trader, min_payout, log
+        self.max_open = max_open                                     # 0 — без ограничения
         self.vol, self.last, self.pairs, self.pays = {}, {}, [], {}
 
     def refresh_pairs(self, symbols):
@@ -149,6 +150,9 @@ class FxBot:
                 continue
             if s in busy:
                 self.log(f"  СИГНАЛ {s} ({z:.1f} разброса), но по паре уже есть открытая ставка — пропуск")
+                continue
+            if self.max_open and len(self.tr.open) >= self.max_open:
+                self.log(f"  СИГНАЛ {s} ({z:.1f}), но открыто уже {len(self.tr.open)} ставок (лимит {self.max_open}) — пропуск")
                 continue
             try:
                 p = payout_15m(self.tr.c, self.tr.currency, s, self.tr.stake)
@@ -231,6 +235,8 @@ def main():
     ap.add_argument("--max-loss", type=float, default=20.0)
     ap.add_argument("--min-payout", type=float, default=0.85)
     ap.add_argument("--minutes", type=int, default=15, choices=[15, 30, 60], help="срок ставки в минутах")
+    ap.add_argument("--max-open", type=int, default=0, help="не больше стольких открытых ставок одновременно (0 — без лимита)."
+                    " Сигналы приходят пачками по одной новости, и такие ставки выигрывают/проигрывают вместе")
     ap.add_argument("--symbols", default="", help="свой список пар через запятую (по умолчанию — все валютные пары Deriv)")
     ap.add_argument("--scan", action="store_true")
     ap.add_argument("--selftest", action="store_true")
@@ -242,7 +248,7 @@ def main():
     MINUTES = a.minutes
     pub = Public()
     trader = B.Trader(B.connect(), a.stake, a.minutes, 10 ** 9, a.max_loss, unit="m")
-    bot = FxBot(pub, trader, a.min_payout)
+    bot = FxBot(pub, trader, a.min_payout, max_open=a.max_open)
     symbols = a.symbols.split(",") if a.symbols else pub.forex_symbols()
     pays = bot.refresh_pairs(symbols)
     print(f"Выплаты на {MINUTES} минут (CALL, ставка {a.stake}) по {len(pays)} парам:")
