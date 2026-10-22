@@ -27,10 +27,11 @@ def enabled():
     return bool(_token() and os.getenv("TELEGRAM_CHAT_ID", "").strip())
 
 
-BUTTONS = [["💰 Баланс", "📈 Текущие ставки"], ["📜 История"]]
+BUTTONS = [["💰 Баланс", "📈 Текущие ставки"], ["📜 История", "📊 Разбивка"]]
 COMMANDS = {"💰 баланс": "balance", "/balance": "balance", "баланс": "balance",
             "📈 текущие ставки": "open", "/open": "open", "текущие ставки": "open", "ставки": "open",
             "📜 история": "history", "/history": "history", "история": "history",
+            "📊 разбивка": "stats", "/stats": "stats", "разбивка": "stats",
             "/start": "help", "/help": "help", "помощь": "help"}
 
 
@@ -96,7 +97,7 @@ class Commands:
                 continue                                             # чужие сообщения игнорируем
             cmd = COMMANDS.get((m.get("text") or "").strip().lower())
             if cmd == "help" or cmd is None:
-                reply("Команды: 💰 Баланс, 📈 Текущие ставки, 📜 История (кнопки внизу).")
+                reply("Команды: 💰 Баланс, 📈 Текущие ставки, 📜 История, 📊 Разбивка (кнопки внизу).")
             else:
                 try:
                     reply(self.handlers[cmd]())

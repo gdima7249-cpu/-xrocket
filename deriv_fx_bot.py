@@ -104,9 +104,10 @@ def is_signal(closes, vol, k=3.0):
 
 
 class FxBot:
-    def __init__(self, pub, trader, min_payout, log=print, max_open=0):
+    def __init__(self, pub, trader, min_payout, log=print, max_open=0, stake_pct=0.0, stake_min=0.5, stake_max=5.0):
         self.pub, self.tr, self.min_payout, self.log = pub, trader, min_payout, log
         self.max_open = max_open                                     # 0 — без ограничения
+        self.stake_pct, self.stake_min, self.stake_max = stake_pct, stake_min, stake_max   # сложный процент (0 — выключен)
         self.vol, self.last, self.pairs, self.pays = {}, {}, [], {}
 
     def refresh_pairs(self, symbols):
@@ -163,11 +164,55 @@ class FxBot:
             if p < self.min_payout:
                 self.log(f"  СИГНАЛ {s} ({z:.1f}), но выплата сейчас {100 * p:.0f}% < {100 * self.min_payout:.0f}% — пропуск")
                 continue
-            self.log(f"  СИГНАЛ {s}: падение {z:.1f} разброса за 15 мин, выплата {100 * p:.0f}% → ВВЕРХ на {MINUTES} мин")
+            if self.stake_pct:                                      # ставка = доля текущего баланса, в пределах [мин, макс]
+                try:
+                    bal = float(self.tr.c.call({"balance": 1})["balance"]["balance"])
+                    self.tr.stake = round(min(self.stake_max, max(self.stake_min, self.stake_pct * bal)), 2)
+                except Exception:  # noqa: BLE001
+                    self.tr.stake = self.stake_min
+            self.log(f"  СИГНАЛ {s}: падение {z:.1f} разброса за 15 мин, выплата {100 * p:.0f}% → ВВЕРХ на {MINUTES} мин, "
+                     f"ставка {self.tr.stake}")
             try:
                 self.tr.place(s, 1, cs[-1][1], symbol=s)
             except Exception as e:  # noqa: BLE001
                 self.log(f"  {s}: ставка не прошла: {str(e)[:120]}")
+
+
+def breakdown(path):
+    """Разбивка журнала ставок: по парам, по выплате, по времени суток (UTC). Текст для Telegram и терминала."""
+    import csv
+    if not os.path.exists(path):
+        return "Журнал пока пуст."
+    with open(path, encoding="utf-8") as f:
+        rows = [r for r in list(csv.reader(f))[1:] if len(r) > 6 and r[6] in ("1", "-1")]
+    if not rows:
+        return "Закрытых ставок в журнале пока нет."
+
+    def line(name, rs):
+        w = sum(r[6] == "1" for r in rs)
+        n = len(rs)
+        pay = sum(float(r[4]) / float(r[3]) - 1 for r in rs if float(r[3]) > 0) / n
+        prof = sum(float(r[5]) for r in rs)
+        return f"{name:<10} {n:>4} ст. {100 * w / n:5.1f}%  выпл.{100 * pay:3.0f}%  {prof:+.2f}"
+
+    out = ["По парам:"]
+    pairs = {}
+    for r in rows:
+        pairs.setdefault(r[1].replace("frx", ""), []).append(r)
+    for k, rs in sorted(pairs.items(), key=lambda kv: -len(kv[1])):
+        out.append("  " + line(k, rs))
+    out.append("По выплате:")
+    for name, lo, hi in (("<84%", -1, 0.84), ("84–86%", 0.84, 0.86), ("≥86%", 0.86, 9)):
+        rs = [r for r in rows if lo <= float(r[4]) / float(r[3]) - 1 < hi]
+        if rs:
+            out.append("  " + line(name, rs))
+    out.append("По времени (UTC, мск = +3):")
+    for name, lo, hi in (("00–06", 0, 6), ("06–12", 6, 12), ("12–18", 12, 18), ("18–24", 18, 24)):
+        rs = [r for r in rows if lo <= int(r[0][11:13] or 0) < hi]
+        if rs:
+            out.append("  " + line(name, rs))
+    out.append("Пока в группе меньше ~100 ставок, её процент — во многом случайность.")
+    return "\n".join(out)
 
 
 def tg_handlers(trader, log_path=None):
@@ -205,7 +250,10 @@ def tg_handlers(trader, log_path=None):
         return (f"📜 Всего в журнале: {len(rows)} ставок, выиграно {w}, проиграно {l} ({pct}), итог {prof:+.2f}\n"
                 f"Последние {min(10, len(rows))}:\n{last}\n\nОтчёт с запуска: {trader.report()}")
 
-    return {"balance": balance, "open": open_bets, "history": history}
+    def stats():
+        return "📊 Разбивка:\n" + breakdown(log_path or B.LOG)
+
+    return {"balance": balance, "open": open_bets, "history": history, "stats": stats}
 
 
 def selftest():
@@ -261,6 +309,19 @@ def selftest():
     low = FxBot(pub, B.Trader(B.FakeClient(), 1, 15, 10 ** 9, 20, log=lambda *a: None, unit="m"), 0.95, log=msgs.append)
     low.refresh_pairs(["frxAAA"])
     ok.append(("при выплате ниже порога пара не берётся", low.pairs == []))
+    # сложный процент: ставка = 2% баланса (имитация баланса 40) → 0.8; с потолком и минимумом
+    class BalClient(B.FakeClient):
+        def call(self, req):
+            if "balance" in req:
+                return {"balance": {"balance": 40.0, "currency": "USD"}}
+            return super().call(req)
+
+    ctr = B.Trader(BalClient(), 0.5, 30, 10 ** 9, 20, log=lambda *a: None, unit="m")
+    cbot = FxBot(pub, ctr, 0.85, log=msgs.append, stake_pct=0.02, stake_min=0.5, stake_max=5)
+    cbot.refresh_pairs(["frxAAA"])
+    cbot.step()
+    ok.append(("сложный процент: ставка 2% от баланса 40 = 0.8", len(ctr.open) == 1 and abs(ctr.stake - 0.8) < 1e-9))
+
     # команды Telegram: отвечаем только владельцу
     os.environ["TELEGRAM_CHAT_ID"] = "777"
     sent = []
@@ -285,6 +346,11 @@ def main():
     ap.add_argument("--max-loss", type=float, default=20.0)
     ap.add_argument("--min-payout", type=float, default=0.85)
     ap.add_argument("--minutes", type=int, default=15, choices=[15, 30, 60], help="срок ставки в минутах")
+    ap.add_argument("--only", default="", help="ставить только на эти пары (через запятую, например frxGBPNZD,frxEURNZD)")
+    ap.add_argument("--stake-pct", type=float, default=0.0,
+                    help="сложный процент: ставка = эта доля баланса (0.02 = 2%%), не меньше --stake и не больше --stake-max. 0 — выключено")
+    ap.add_argument("--stake-max", type=float, default=5.0, help="потолок ставки при --stake-pct")
+    ap.add_argument("--stats", action="store_true", help="показать разбивку журнала (по парам, выплате, времени) и выйти")
     ap.add_argument("--max-open", type=int, default=0, help="не больше стольких открытых ставок одновременно (0 — без лимита)."
                     " Сигналы приходят пачками по одной новости, и такие ставки выигрывают/проигрывают вместе")
     ap.add_argument("--symbols", default="", help="свой список пар через запятую (по умолчанию — все валютные пары Deriv)")
@@ -298,8 +364,10 @@ def main():
     MINUTES = a.minutes
     pub = Public()
     trader = B.Trader(B.connect(), a.stake, a.minutes, 10 ** 9, a.max_loss, unit="m")
-    bot = FxBot(pub, trader, a.min_payout, max_open=a.max_open)
+    bot = FxBot(pub, trader, a.min_payout, max_open=a.max_open, stake_pct=a.stake_pct, stake_min=a.stake, stake_max=a.stake_max)
     symbols = a.symbols.split(",") if a.symbols else pub.forex_symbols()
+    if a.only:
+        symbols = [x for x in symbols if x in set(a.only.split(","))]
     pays = bot.refresh_pairs(symbols)
     print(f"Выплаты на {MINUTES} минут (CALL, ставка {a.stake}) по {len(pays)} парам:")
     for s, p in sorted(pays.items(), key=lambda x: -x[1]):
