@@ -79,10 +79,13 @@ class Public:
             return list(FALLBACK)
 
 
+MINUTES = 15                                                         # срок ставки (меняется флагом --minutes)
+
+
 def payout_15m(client, currency, symbol, stake=10.0):
-    """Выплата в долях ставки для CALL на 15 минут — на ТОЙ сумме, которую бот реально ставит (на малых ставках она бывает ниже)."""
+    """Выплата в долях ставки для CALL на MINUTES минут — на ТОЙ сумме, которую бот реально ставит (на малых ставках она ниже)."""
     pr = client.call({"proposal": 1, "amount": stake, "basis": "stake", "contract_type": "CALL", "currency": currency,
-                      "duration": 15, "duration_unit": "m", "underlying_symbol": symbol})["proposal"]
+                      "duration": MINUTES, "duration_unit": "m", "underlying_symbol": symbol})["proposal"]
     return float(pr["payout"]) / float(pr["ask_price"]) - 1
 
 
@@ -155,7 +158,7 @@ class FxBot:
             if p < self.min_payout:
                 self.log(f"  СИГНАЛ {s} ({z:.1f}), но выплата сейчас {100 * p:.0f}% < {100 * self.min_payout:.0f}% — пропуск")
                 continue
-            self.log(f"  СИГНАЛ {s}: падение {z:.1f} разброса за 15 мин, выплата {100 * p:.0f}% → ВВЕРХ на 15 мин")
+            self.log(f"  СИГНАЛ {s}: падение {z:.1f} разброса за 15 мин, выплата {100 * p:.0f}% → ВВЕРХ на {MINUTES} мин")
             try:
                 self.tr.place(s, 1, cs[-1][1], symbol=s)
             except Exception as e:  # noqa: BLE001
@@ -227,6 +230,7 @@ def main():
     ap.add_argument("--stake", type=float, default=1.0)
     ap.add_argument("--max-loss", type=float, default=20.0)
     ap.add_argument("--min-payout", type=float, default=0.85)
+    ap.add_argument("--minutes", type=int, default=15, choices=[15, 30, 60], help="срок ставки в минутах")
     ap.add_argument("--symbols", default="", help="свой список пар через запятую (по умолчанию — все валютные пары Deriv)")
     ap.add_argument("--scan", action="store_true")
     ap.add_argument("--selftest", action="store_true")
@@ -234,12 +238,14 @@ def main():
     if a.selftest:
         raise SystemExit(0 if selftest() else 1)
 
+    global MINUTES
+    MINUTES = a.minutes
     pub = Public()
-    trader = B.Trader(B.connect(), a.stake, 15, 10 ** 9, a.max_loss, unit="m")
+    trader = B.Trader(B.connect(), a.stake, a.minutes, 10 ** 9, a.max_loss, unit="m")
     bot = FxBot(pub, trader, a.min_payout)
     symbols = a.symbols.split(",") if a.symbols else pub.forex_symbols()
     pays = bot.refresh_pairs(symbols)
-    print(f"Выплаты на 15 минут (CALL) по {len(pays)} парам:")
+    print(f"Выплаты на {MINUTES} минут (CALL, ставка {a.stake}) по {len(pays)} парам:")
     for s, p in sorted(pays.items(), key=lambda x: -x[1]):
         print(f"  {s:<12}{100 * p:5.0f}%   порог {100 / (1 + p):.1f}%" + ("   ← берём" if s in bot.pairs else ""))
     if bot.errors:
