@@ -139,6 +139,8 @@ class FxBot:
             if len(cs) < 4 or self.last.get(s) == cs[-1][0]:
                 continue
             self.last[s] = cs[-1][0]
+            if any(b[0] - a[0] != GRAN for a, b in zip(cs[-4:], cs[-3:])):   # внутри окна перерыв в торговле (ночь, выходные)
+                continue
             sig, z = is_signal([c for _, c in cs], self.vol[s])
             if not sig:
                 continue
@@ -201,6 +203,15 @@ def selftest():
     ok.append(("та же свеча не даёт повторной ставки", fc.n == 1))
     tr.poll()
     ok.append(("итог ставки записан", len(tr.done) == 1 and tr.done[0]["res"] == 1))
+    gap_pub = FakePub()
+    gap_pub.data["frxGAP"] = base[:-3] + [(now - 2 * GRAN - 48 * 3600, crash[-3]), (now - 2 * GRAN, crash[-2]),
+                                          (now - GRAN, crash[-1])]
+    gtr = B.Trader(B.FakeClient(), 1, 15, 10 ** 9, 20, log=lambda *a: None, unit="m")
+    gbot = FxBot(gap_pub, gtr, 0.85, log=msgs.append)
+    gbot.refresh_pairs(["frxGAP"])
+    gbot.vol["frxGAP"] = vol
+    gbot.step()
+    ok.append(("падение через перерыв в торговле (выходные) не даёт ставки", not gtr.open))
     low = FxBot(pub, B.Trader(B.FakeClient(), 1, 15, 10 ** 9, 20, log=lambda *a: None, unit="m"), 0.95, log=msgs.append)
     low.refresh_pairs(["frxAAA"])
     ok.append(("при выплате ниже порога пара не берётся", low.pairs == []))

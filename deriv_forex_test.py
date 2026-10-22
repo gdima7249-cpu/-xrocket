@@ -10,6 +10,7 @@
   python deriv_forex_test.py --symbol frxEURUSD --payout
   python deriv_forex_test.py --symbol frxEURUSD,frxGBPUSD,frxUSDJPY,frxAUDUSD,frxUSDCAD --payout   # несколько пар + общий итог
   python deriv_forex_test.py --symbol frxGBPNZD,frxEURNZD,frxGBPAUD --delay 1   # вход на 5 минут позже сигнала
+  python deriv_forex_test.py --list                  # какие символы есть на Deriv (индексы, сырьё, валюты)
   python deriv_forex_test.py --synthetic              # случайные цены: везде должно быть около 50%
 """
 import argparse
@@ -84,14 +85,20 @@ def fetch_candles(symbol, total, gran=300, ws=None, pause=2.0):
 DELAY = 0
 
 
-def features(c, h):
+def features(c, h, ts=None, gran=300):
     """X — последние LAGS изменений (в долях обычного разброса) и их суммы; y — цена через h свечей выше текущей (1) или ниже (0).
-    Свечи, у которых следующие h свечей пересекают перерыв в торговле (выходные), отбрасываются."""
+    Если переданы времена свечей ts, окна, где между сигналом и выходом есть перерыв в торговле (ночь, выходные, праздники),
+    отбрасываются: иначе разрыв цены на открытии рынка выглядел бы как «резкое движение за 15 минут»."""
     r = np.diff(np.log(c))
     vol = np.std(r) + 1e-12
     X, Y, Z = [], [], []
     d = DELAY
+    gaps = None
+    if ts is not None:
+        gaps = np.r_[0, np.cumsum(np.diff(np.asarray(ts)) != gran)]   # число перерывов до каждой свечи
     for t in range(LAGS + 48, len(r) - h - d):
+        if gaps is not None and gaps[t + d + h] != gaps[t - 3]:         # окно сигнал→выход пересекает перерыв
+            continue
         w = r[t - LAGS:t] / vol
         fut = c[t + d + h] - c[t + d]                               # вход через d свечей после сигнала
         if fut == 0:
@@ -140,19 +147,46 @@ def payouts(symbol, minutes):
     return out
 
 
+def list_symbols():
+    """Печатает символы публичной ленты Deriv по рынкам (кроме синтетических индексов, у которых цену рисует генератор)."""
+    import websocket
+    ws = websocket.create_connection(T.WS_URL, timeout=30)
+    ws.send(json.dumps({"active_symbols": "brief"}))
+    msg = json.loads(ws.recv())
+    ws.close()
+    if msg.get("error"):
+        raise SystemExit(f"Deriv API: {msg['error'].get('message')}")
+    items = msg.get("active_symbols") or []
+    if not items:
+        raise SystemExit(f"Пустой ответ: {str(msg)[:300]}")
+    groups = {}
+    for it in items:
+        sym = it.get("underlying_symbol") or it.get("symbol") or "?"
+        market = it.get("market_display_name") or it.get("market") or "?"
+        name = it.get("display_name") or it.get("underlying_symbol_name") or ""
+        if "synthetic" in str(market).lower() or "derived" in str(market).lower():
+            continue
+        groups.setdefault(market, []).append(f"{sym:<14}{name}")
+    for market, rows in sorted(groups.items()):
+        print(f"\n{market}:")
+        for r in sorted(rows):
+            print("  " + r)
+    print("\nДля проверки подставьте символы через запятую:  python deriv_forex_test.py --symbol СИМВОЛ1,СИМВОЛ2 --payout")
+
+
 def run_one(symbol, candles, payout, synthetic, total):
     """Проверка одной пары; добавляет результаты правила отката в total[срок] = [угадано, ставок, выплата]."""
     if synthetic:
-        c = T.synthetic(candles)
+        c, ts = T.synthetic(candles), None
     else:
-        _, c = fetch_candles(symbol, candles)
+        ts, c = fetch_candles(symbol, candles)
     if len(c) < 5000:
         print(f"{symbol}: слишком мало свечей, пропуск")
         return
     pays = payouts(symbol, [15, 30, 60]) if payout else {}
     print(f"\n{symbol}: {len(c)} свечей. Доля угаданных на будущих кусках истории (4 куска).")
     for h, mnt in ((3, 15), (6, 30), (12, 60)):
-        X, Y, Z = features(c, h)
+        X, Y, Z = features(c, h, ts)
         res = walk(X, Y, Z, h)
         pay = pays.get(mnt)
         be = 1 / (1 + pay) if pay else None
@@ -184,8 +218,12 @@ def main():
     ap.add_argument("--candles", type=int, default=60000, help="сколько 5-минутных свечей скачать (60000 ≈ 10 месяцев торговли)")
     ap.add_argument("--payout", action="store_true", help="спросить у Deriv реальную выплату (нужен .env демо-счёта)")
     ap.add_argument("--delay", type=int, default=0, help="вход на столько 5-минутных свечей позже сигнала (проверка на «выбросы»)")
+    ap.add_argument("--list", action="store_true", help="показать символы Deriv (индексы, сырьё, валюты) и выйти")
     ap.add_argument("--synthetic", action="store_true")
     a = ap.parse_args()
+    if a.list:
+        list_symbols()
+        return
     global DELAY
     DELAY = a.delay
     if a.delay:
