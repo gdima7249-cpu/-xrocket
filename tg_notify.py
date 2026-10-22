@@ -27,17 +27,83 @@ def enabled():
     return bool(_token() and os.getenv("TELEGRAM_CHAT_ID", "").strip())
 
 
-def send(text):
-    """Отправить сообщение. Если Telegram не настроен или недоступен — молча ничего не делает (бот не должен падать)."""
+BUTTONS = [["💰 Баланс", "📈 Текущие ставки"], ["📜 История"]]
+COMMANDS = {"💰 баланс": "balance", "/balance": "balance", "баланс": "balance",
+            "📈 текущие ставки": "open", "/open": "open", "текущие ставки": "open", "ставки": "open",
+            "📜 история": "history", "/history": "history", "история": "history",
+            "/start": "help", "/help": "help", "помощь": "help"}
+
+
+def send(text, keyboard=True):
+    """Отправить сообщение (с кнопками команд). Если Telegram не настроен или недоступен — молча ничего не делает."""
     if not enabled():
         return False
     try:
+        import json
         import requests
-        r = requests.post(API.format(token=_token(), method="sendMessage"),
-                          data={"chat_id": os.getenv("TELEGRAM_CHAT_ID").strip(), "text": text[:4000]}, timeout=15)
+        data = {"chat_id": os.getenv("TELEGRAM_CHAT_ID").strip(), "text": text[:4000]}
+        if keyboard:
+            data["reply_markup"] = json.dumps({"keyboard": [[{"text": b} for b in row] for row in BUTTONS], "resize_keyboard": True})
+        r = requests.post(API.format(token=_token(), method="sendMessage"), data=data, timeout=15)
         return r.ok
     except Exception:  # noqa: BLE001
         return False
+
+
+class Commands:
+    """Читает новые сообщения боту и отвечает на команды. Отвечает ТОЛЬКО владельцу (TELEGRAM_CHAT_ID), остальных игнорирует.
+    handlers: {"balance": функция() -> текст, "open": ..., "history": ...}."""
+
+    def __init__(self, handlers, get=None):
+        self.handlers, self.offset, self._get = handlers, None, get
+        self._skip_old()
+
+    def _updates(self, timeout=0):
+        if self._get:
+            return self._get(self.offset)
+        import requests
+        params = {"timeout": timeout}
+        if self.offset is not None:
+            params["offset"] = self.offset
+        r = requests.get(API.format(token=_token(), method="getUpdates"), params=params, timeout=timeout + 15).json()
+        return r.get("result", []) if r.get("ok") else []
+
+    def _skip_old(self):
+        """Старые команды (отправленные, пока бот был выключен) не выполняем."""
+        if not enabled() and not self._get:
+            return
+        try:
+            ups = self._updates()
+            if ups:
+                self.offset = ups[-1]["update_id"] + 1
+        except Exception:  # noqa: BLE001
+            pass
+
+    def poll(self, reply=None):
+        if not enabled() and not self._get:
+            return 0
+        reply = reply or send
+        try:
+            ups = self._updates()
+        except Exception:  # noqa: BLE001
+            return 0
+        n = 0
+        owner = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        for u in ups:
+            self.offset = u["update_id"] + 1
+            m = u.get("message") or {}
+            if str((m.get("chat") or {}).get("id")) != owner:
+                continue                                             # чужие сообщения игнорируем
+            cmd = COMMANDS.get((m.get("text") or "").strip().lower())
+            if cmd == "help" or cmd is None:
+                reply("Команды: 💰 Баланс, 📈 Текущие ставки, 📜 История (кнопки внизу).")
+            else:
+                try:
+                    reply(self.handlers[cmd]())
+                except Exception as e:  # noqa: BLE001
+                    reply(f"Не получилось: {type(e).__name__}: {str(e)[:150]}")
+            n += 1
+        return n
 
 
 def setup(env_path=".env"):

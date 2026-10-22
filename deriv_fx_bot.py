@@ -170,6 +170,44 @@ class FxBot:
                 self.log(f"  {s}: ставка не прошла: {str(e)[:120]}")
 
 
+def tg_handlers(trader, log_path=None):
+    """Ответы на команды из Telegram: баланс, открытые ставки, история (из журнала deriv_log.csv — переживает перезапуски)."""
+    import csv
+
+    def balance():
+        bal = trader.c.call({"balance": 1})["balance"]
+        made = sum(x["profit"] for x in trader.done)
+        return (f"💰 Баланс ДЕМО-счёта: {float(bal.get('balance', 0)):.2f} {bal.get('currency', trader.currency)}\n"
+                f"С запуска бота: {len(trader.done)} закрытых ставок, итог {made:+.2f}; открыто сейчас: {len(trader.open)}")
+
+    def open_bets():
+        if not trader.open:
+            return "📈 Открытых ставок нет."
+        now = time.time()
+        rows = [f"{o['base'].replace('frx', '')}: ВВЕРХ, ставка {o['stake']}, выплата {o['payout']:.2f}, "
+                f"до закрытия ~{max(0, int((o['t'] + trader.expiry * 60 - now) // 60))} мин" for o in trader.open.values()]
+        return f"📈 Открытые ставки ({len(rows)}):\n" + "\n".join(rows)
+
+    def history():
+        path = log_path or B.LOG
+        if not os.path.exists(path):
+            return "📜 Журнал пока пуст."
+        with open(path, encoding="utf-8") as f:
+            rows = list(csv.reader(f))[1:]
+        if not rows:
+            return "📜 Журнал пока пуст."
+        res = [int(r[6]) for r in rows if len(r) > 6 and r[6].lstrip("-").isdigit()]
+        prof = sum(float(r[5]) for r in rows if len(r) > 5)
+        w, l = sum(x > 0 for x in res), sum(x < 0 for x in res)
+        last = "\n".join(f"{r[0][5:16]} {r[1].replace('frx', '')} {'✅' if r[6] == '1' else '❌' if r[6] == '-1' else '➖'} {float(r[5]):+.2f}"
+                         for r in rows[-10:])
+        pct = f"{100 * w / (w + l):.1f}%" if w + l else "—"
+        return (f"📜 Всего в журнале: {len(rows)} ставок, выиграно {w}, проиграно {l} ({pct}), итог {prof:+.2f}\n"
+                f"Последние {min(10, len(rows))}:\n{last}\n\nОтчёт с запуска: {trader.report()}")
+
+    return {"balance": balance, "open": open_bets, "history": history}
+
+
 def selftest():
     import tempfile
     B.LOG = os.path.join(tempfile.mkdtemp(), "d.csv")
@@ -223,6 +261,17 @@ def selftest():
     low = FxBot(pub, B.Trader(B.FakeClient(), 1, 15, 10 ** 9, 20, log=lambda *a: None, unit="m"), 0.95, log=msgs.append)
     low.refresh_pairs(["frxAAA"])
     ok.append(("при выплате ниже порога пара не берётся", low.pairs == []))
+    # команды Telegram: отвечаем только владельцу
+    os.environ["TELEGRAM_CHAT_ID"] = "777"
+    sent = []
+    queue = [[{"update_id": 1, "message": {"chat": {"id": 1}, "text": "старое"}}],
+             [{"update_id": 2, "message": {"chat": {"id": 777}, "text": "📈 Текущие ставки"}},
+              {"update_id": 3, "message": {"chat": {"id": 999}, "text": "📜 История"}},
+              {"update_id": 4, "message": {"chat": {"id": 777}, "text": "📜 История"}}]]
+    cmds = tg_notify.Commands(tg_handlers(tr), get=lambda off: queue.pop(0) if queue else [])
+    cmds.poll(reply=sent.append)
+    ok.append(("Telegram: ответ только владельцу, на 2 команды", len(sent) == 2 and "Открытых ставок нет" in sent[0]
+               and "Всего в журнале: 1" in sent[1]))
     for name, good in ok:
         print(("  ok   " if good else "  FAIL ") + name)
     n = sum(g for _, g in ok)
@@ -264,8 +313,11 @@ def main():
     if not bot.pairs:
         raise SystemExit(f"Сейчас нет пар с выплатой ≥{100 * a.min_payout:.0f}% (рынок закрыт или выплаты снижены). Попробуйте позже.")
     print(f"\nРаботает на ДЕМО: {len(bot.pairs)} пар, ставка {a.stake}, лимит потерь {a.max_loss}. Ctrl+C — стоп.")
-    tg_notify.send(f"▶️ Deriv-бот (валюты) запущен на ДЕМО: {len(bot.pairs)} пар, ставка {a.stake}, срок {a.minutes} мин.")
+    tg_notify.send(f"▶️ Deriv-бот (валюты) запущен на ДЕМО: {len(bot.pairs)} пар, ставка {a.stake}, срок {a.minutes} мин.\n"
+                   "Кнопки внизу: 💰 Баланс, 📈 Текущие ставки, 📜 История.")
+    cmds = tg_notify.Commands(tg_handlers(trader))
     last_pairs = last_rep = time.time()
+    last_poll = 0.0
     reported = 0
     while True:
         try:
@@ -274,8 +326,9 @@ def main():
                 bot.vol.clear()
                 last_pairs = time.time()
                 print(datetime.now().strftime("[%H:%M] ") + f"пары с выплатой ≥{100 * a.min_payout:.0f}%: {', '.join(bot.pairs) or 'нет'}")
-            if trader.open:
+            if trader.open and time.time() - last_poll >= 20:            # итоги ставок проверяем раз в 20 с (не чаще — лимиты Deriv)
                 trader.poll()
+                last_poll = time.time()
             if trader.halted and not trader.open:
                 print("Лимит потерь достигнут, бот остановлен.\nИТОГ: " + trader.report())
                 tg_notify.send("⛔ Deriv-бот остановлен по лимиту потерь.\n" + trader.report())
@@ -283,6 +336,7 @@ def main():
             if not trader.halted:
                 bot.step()
             getattr(trader.c, "idle_ping", lambda: None)()
+            cmds.poll()
             if len(trader.done) >= reported + 25 or time.time() - last_rep > 6 * 3600:
                 print(datetime.now().strftime("[%H:%M] ") + trader.report())
                 tg_notify.send("📊 Deriv-бот (валюты): " + trader.report())
@@ -295,7 +349,7 @@ def main():
             print(f"  ошибка прохода: {type(e).__name__}: {str(e)[:120]}")
         # спим до ближайшего закрытия 5-минутной свечи (+3 с), но не дольше 20 с — чтобы и входить сразу, и проверять ставки
         to_close = GRAN - (time.time() % GRAN) + 3
-        time.sleep(min(20, to_close))
+        time.sleep(min(5, to_close))                                 # раз в 5 с — чтобы быстро отвечать на команды в Telegram
 
 
 if __name__ == "__main__":
