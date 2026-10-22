@@ -152,6 +152,60 @@ def payouts(symbol, minutes):
     return out
 
 
+POOL = []                                                            # события «резкое падение» по всем парам (для модели уверенности)
+
+
+def pool_events(symbol, c, ts, h=6, gran=300):
+    """События «падение >3 разбросов за 15 мин» для срока h свечей (по умолчанию 30 мин) с признаками для модели уверенности."""
+    r = np.diff(np.log(c))
+    vol = np.std(r) + 1e-12
+    d = DELAY
+    gaps = np.r_[0, np.cumsum(np.diff(np.asarray(ts)) != gran)] if ts is not None else None
+    cross = 0.0 if "USD" in symbol else 1.0
+    for t in range(LAGS + 48, len(r) - h - d):
+        z = r[t - 3:t].sum() / vol / np.sqrt(3)
+        if z > -3:
+            continue
+        if gaps is not None and gaps[t + d + h] != gaps[t - 3]:
+            continue
+        fut = c[t + d + h] - c[t + d]
+        if fut == 0:
+            continue
+        hour = (ts[t] % 86400) / 3600 if ts is not None else 0.0
+        f = [-z, r[t - 48:t].std() / vol, r[t - 12:t - 3].sum() / vol, r[t - 48:t - 12].sum() / vol,
+             np.sin(2 * np.pi * hour / 24), np.cos(2 * np.pi * hour / 24), cross]
+        POOL.append((float(ts[t]) if ts is not None else float(t), f, 1.0 if fut > 0 else 0.0))
+
+
+def confidence_report(folds=4):
+    """Учимся на прошлых сигналах (все пары вместе, по времени), предсказываем будущие; делим на трети по уверенности."""
+    if len(POOL) < 400:
+        print(f"\nМодель уверенности: мало сигналов ({len(POOL)}), нужно хотя бы 400.")
+        return
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    ev = sorted(POOL, key=lambda e: e[0])
+    X = np.array([e[1] for e in ev])
+    Y = np.array([e[2] for e in ev])
+    edges = np.linspace(0, len(Y), folds + 1).astype(int)
+    P, YY = [], []
+    for k in range(1, folds):
+        tr, te = slice(0, edges[k]), slice(edges[k], edges[k + 1])
+        sc = StandardScaler().fit(X[tr])
+        m = LogisticRegression(C=0.3, max_iter=1000).fit(sc.transform(X[tr]), Y[tr])
+        P.append(m.predict_proba(sc.transform(X[te]))[:, 1])
+        YY.append(Y[te])
+    P, YY = np.concatenate(P), np.concatenate(YY)
+    q1, q2 = np.quantile(P, [1 / 3, 2 / 3])
+    print(f"\nМОДЕЛЬ УВЕРЕННОСТИ (срок 30 мин; учится на прошлых сигналах всех пар, проверка на будущих; {len(YY)} сигналов):")
+    for name, msk in (("низкая уверенность", P < q1), ("средняя", (P >= q1) & (P < q2)), ("высокая уверенность", P >= q2)):
+        n = int(msk.sum())
+        p = YY[msk].mean() if n else float("nan")
+        ci = 1.96 * np.sqrt(p * (1 - p) / n) if n else float("nan")
+        print(f"  {name:<22}{n:>6} сигналов, угадано {100 * p:5.1f}% ± {100 * ci:.1f}")
+    print("  Если «высокая» заметно выше «низкой» (разница больше погрешностей), ставить больше на уверенные сигналы имеет смысл.")
+
+
 def list_symbols():
     """Печатает символы публичной ленты Deriv по рынкам (кроме синтетических индексов, у которых цену рисует генератор)."""
     import websocket
@@ -189,6 +243,7 @@ def run_one(symbol, candles, payout, synthetic, total):
         print(f"{symbol}: слишком мало свечей, пропуск")
         return
     pays = payouts(symbol, [15, 30, 60]) if payout else {}
+    pool_events(symbol, c, ts)
     print(f"\n{symbol}: {len(c)} свечей. Доля угаданных на будущих кусках истории (4 куска).")
     for h, mnt in ((3, 15), (6, 30), (12, 60)):
         X, Y, Z = features(c, h, ts)
@@ -246,6 +301,7 @@ def main():
             run_one(sym, a.candles, a.payout, a.synthetic, total)
         except SystemExit as e:
             print(f"{sym}: {e}")
+    confidence_report()
     if len(syms) > 1:
         print("\nОБЩИЙ ИТОГ правил отката по всем парам:")
         for (name, mnt), (w, n, pays) in sorted(total.items()):
