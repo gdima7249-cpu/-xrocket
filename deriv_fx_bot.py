@@ -108,6 +108,10 @@ class FxBot:
         self.pub, self.tr, self.min_payout, self.log = pub, trader, min_payout, log
         self.max_open = max_open                                     # 0 — без ограничения
         self.stake_pct, self.stake_min, self.stake_max = stake_pct, stake_min, stake_max   # сложный процент (0 — выключен)
+        self.cnt = {"сигналов": 0, "поставлено": 0, "пропуск: низкая выплата": 0, "пропуск: пара занята": 0,
+                    "пропуск: лимит открытых": 0, "ошибка ставки": 0}                         # счётчики с запуска
+        self.low_pays = []                                           # выплаты у пропущенных сигналов
+        self.watch = None                                            # все пары под наблюдением (выплата проверяется в момент сигнала)
         self.vol, self.last, self.pairs, self.pays = {}, {}, [], {}
 
     def refresh_pairs(self, symbols):
@@ -134,7 +138,7 @@ class FxBot:
         """Проверить закрытые свечи по всем парам; при сигнале — поставить ВВЕРХ на 15 минут (если выплата ещё ≥ порога)."""
         busy = {o.get("base") for o in self.tr.open.values()}
         closed_open = (int(time.time()) // GRAN - 1) * GRAN           # время открытия последней закрытой свечи
-        for s in self.pairs:
+        for s in (self.watch or self.pairs):
             if self.last.get(s) == closed_open:                     # эту свечу уже проверили — не тратим запрос
                 continue
             if s not in self.vol:
@@ -150,11 +154,14 @@ class FxBot:
             sig, z = is_signal([c for _, c in cs], self.vol[s])
             if not sig:
                 continue
+            self.cnt["сигналов"] += 1
             if s in busy:
                 self.log(f"  СИГНАЛ {s} ({z:.1f} разброса), но по паре уже есть открытая ставка — пропуск")
+                self.cnt["пропуск: пара занята"] += 1
                 continue
             if self.max_open and len(self.tr.open) >= self.max_open:
                 self.log(f"  СИГНАЛ {s} ({z:.1f}), но открыто уже {len(self.tr.open)} ставок (лимит {self.max_open}) — пропуск")
+                self.cnt["пропуск: лимит открытых"] += 1
                 continue
             try:
                 p = payout_15m(self.tr.c, self.tr.currency, s, self.tr.stake)
@@ -163,6 +170,8 @@ class FxBot:
                 continue
             if p < self.min_payout:
                 self.log(f"  СИГНАЛ {s} ({z:.1f}), но выплата сейчас {100 * p:.0f}% < {100 * self.min_payout:.0f}% — пропуск")
+                self.cnt["пропуск: низкая выплата"] += 1
+                self.low_pays.append(p)
                 continue
             if self.stake_pct:                                      # ставка = доля текущего баланса, в пределах [мин, макс]
                 try:
@@ -173,9 +182,11 @@ class FxBot:
             self.log(f"  СИГНАЛ {s}: падение {z:.1f} разброса за 15 мин, выплата {100 * p:.0f}% → ВВЕРХ на {MINUTES} мин, "
                      f"ставка {self.tr.stake}")
             try:
-                self.tr.place(s, 1, cs[-1][1], symbol=s)
+                if self.tr.place(s, 1, cs[-1][1], symbol=s):
+                    self.cnt["поставлено"] += 1
             except Exception as e:  # noqa: BLE001
                 self.log(f"  {s}: ставка не прошла: {str(e)[:120]}")
+                self.cnt["ошибка ставки"] += 1
 
 
 def breakdown(path):
@@ -215,7 +226,21 @@ def breakdown(path):
     return "\n".join(out)
 
 
-def tg_handlers(trader, log_path=None):
+def counters_text(bot):
+    if bot is None:
+        return ""
+    c = bot.cnt
+    extra = ""
+    if bot.low_pays:
+        extra = f" (выплата у пропущенных: от {100 * min(bot.low_pays):.0f}% до {100 * max(bot.low_pays):.0f}%)"
+    return ("\n\nС запуска бота: сигналов " + str(c["сигналов"]) + ", поставлено " + str(c["поставлено"]) +
+            "; пропущено: низкая выплата " + str(c["пропуск: низкая выплата"]) + extra +
+            ", пара занята " + str(c["пропуск: пара занята"]) + ", лимит открытых " + str(c["пропуск: лимит открытых"]) +
+            ", ошибки " + str(c["ошибка ставки"]) +
+            f". Под наблюдением пар: {len(bot.watch or bot.pairs)}, из них сейчас с выплатой ≥ порога: {len(bot.pairs)}.")
+
+
+def tg_handlers(trader, log_path=None, bot=None):
     """Ответы на команды из Telegram: баланс, открытые ставки, история (из журнала deriv_log.csv — переживает перезапуски)."""
     import csv
 
@@ -248,7 +273,7 @@ def tg_handlers(trader, log_path=None):
                          for r in rows[-10:])
         pct = f"{100 * w / (w + l):.1f}%" if w + l else "—"
         return (f"📜 Всего в журнале: {len(rows)} ставок, выиграно {w}, проиграно {l} ({pct}), итог {prof:+.2f}\n"
-                f"Последние {min(10, len(rows))}:\n{last}\n\nОтчёт с запуска: {trader.report()}")
+                f"Последние {min(10, len(rows))}:\n{last}\n\nОтчёт с запуска: {trader.report()}" + counters_text(bot))
 
     def stats():
         return "📊 Разбивка:\n" + breakdown(log_path or B.LOG)
@@ -309,6 +334,10 @@ def selftest():
     low = FxBot(pub, B.Trader(B.FakeClient(), 1, 15, 10 ** 9, 20, log=lambda *a: None, unit="m"), 0.95, log=msgs.append)
     low.refresh_pairs(["frxAAA"])
     ok.append(("при выплате ниже порога пара не берётся", low.pairs == []))
+    low.watch = ["frxAAA"]
+    low.step()
+    ok.append(("пара под наблюдением даже при низкой выплате: сигнал виден и учтён как пропуск",
+               low.cnt["сигналов"] == 1 and low.cnt["пропуск: низкая выплата"] == 1 and not low.tr.open))
     # сложный процент: ставка = 2% баланса (имитация баланса 40) → 0.8; с потолком и минимумом
     class BalClient(B.FakeClient):
         def call(self, req):
@@ -378,12 +407,13 @@ def main():
             print(f"  {s}: {e}")
     if a.scan:
         return
-    if not bot.pairs:
-        raise SystemExit(f"Сейчас нет пар с выплатой ≥{100 * a.min_payout:.0f}% (рынок закрыт или выплаты снижены). Попробуйте позже.")
+    if not bot.pays:
+        raise SystemExit("Deriv не дал выплату ни по одной паре (рынок закрыт?). Попробуйте позже.")
     print(f"\nРаботает на ДЕМО: {len(bot.pairs)} пар, ставка {a.stake}, лимит потерь {a.max_loss}. Ctrl+C — стоп.")
     tg_notify.send(f"▶️ Deriv-бот (валюты) запущен на ДЕМО: {len(bot.pairs)} пар, ставка {a.stake}, срок {a.minutes} мин.\n"
                    "Кнопки внизу: 💰 Баланс, 📈 Текущие ставки, 📜 История.")
-    cmds = tg_notify.Commands(tg_handlers(trader))
+    bot.watch = [x for x in symbols if x in bot.pays]                # следим за всеми парами, где Deriv вообще даёт ставку на этот срок
+    cmds = tg_notify.Commands(tg_handlers(trader, bot=bot))
     last_pairs = last_rep = time.time()
     last_poll = 0.0
     reported = 0
@@ -391,6 +421,7 @@ def main():
         try:
             if time.time() - last_pairs > 2 * 3600:
                 bot.refresh_pairs(symbols)
+                bot.watch = sorted(set(bot.watch or []) | set(bot.pays))
                 bot.vol.clear()
                 last_pairs = time.time()
                 print(datetime.now().strftime("[%H:%M] ") + f"пары с выплатой ≥{100 * a.min_payout:.0f}%: {', '.join(bot.pairs) or 'нет'}")
