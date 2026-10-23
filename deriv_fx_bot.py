@@ -112,6 +112,7 @@ class FxBot:
                     "пропуск: лимит открытых": 0, "ошибка ставки": 0}                         # счётчики с запуска
         self.low_pays = []                                           # выплаты у пропущенных сигналов
         self.watch = None                                            # все пары под наблюдением (выплата проверяется в момент сигнала)
+        self.k = 3.0                                                 # порог силы падения в «разбросах» (флаг --k)
         self.vol, self.last, self.pairs, self.pays = {}, {}, [], {}
 
     def refresh_pairs(self, symbols):
@@ -151,7 +152,7 @@ class FxBot:
             self.last[s] = cs[-1][0]
             if any(b[0] - a[0] != GRAN for a, b in zip(cs[-4:], cs[-3:])):   # внутри окна перерыв в торговле (ночь, выходные)
                 continue
-            sig, z = is_signal([c for _, c in cs], self.vol[s])
+            sig, z = is_signal([c for _, c in cs], self.vol[s], self.k)
             if not sig:
                 continue
             self.cnt["сигналов"] += 1
@@ -375,6 +376,7 @@ def main():
     ap.add_argument("--max-loss", type=float, default=20.0)
     ap.add_argument("--min-payout", type=float, default=0.85)
     ap.add_argument("--minutes", type=int, default=15, choices=[15, 30, 60], help="срок ставки в минутах")
+    ap.add_argument("--k", type=float, default=3.0, help="порог силы падения в разбросах (по умолчанию 3; меньше — больше сигналов)")
     ap.add_argument("--only", default="", help="ставить только на эти пары (через запятую, например frxGBPNZD,frxEURNZD)")
     ap.add_argument("--stake-pct", type=float, default=0.0,
                     help="сложный процент: ставка = эта доля баланса (0.02 = 2%%), не меньше --stake и не больше --stake-max. 0 — выключено")
@@ -412,6 +414,7 @@ def main():
     print(f"\nРаботает на ДЕМО: {len(bot.pairs)} пар, ставка {a.stake}, лимит потерь {a.max_loss}. Ctrl+C — стоп.")
     tg_notify.send(f"▶️ Deriv-бот (валюты) запущен на ДЕМО: {len(bot.pairs)} пар, ставка {a.stake}, срок {a.minutes} мин.\n"
                    "Кнопки внизу: 💰 Баланс, 📈 Текущие ставки, 📜 История.")
+    bot.k = a.k
     bot.watch = [x for x in symbols if x in bot.pays]                # следим за всеми парами, где Deriv вообще даёт ставку на этот срок
     cmds = tg_notify.Commands(tg_handlers(trader, bot=bot))
     last_pairs = last_rep = time.time()
