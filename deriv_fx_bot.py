@@ -21,11 +21,12 @@ import json
 import math
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import deriv_demo_bot as B
 import tg_notify
 
+SHADOW = "deriv_shadow.csv"                                          # теневой журнал всех сигналов (без денег)
 PUBLIC_WS = os.getenv("DERIV_WS_URL", "wss://api.derivws.com/trading/v1/options/ws/public")
 GRAN = 300
 FALLBACK = ("frxEURUSD,frxGBPUSD,frxUSDJPY,frxAUDUSD,frxUSDCAD,frxUSDCHF,frxGBPCAD,frxEURGBP,frxEURJPY,frxGBPJPY,frxAUDJPY,"
@@ -113,6 +114,8 @@ class FxBot:
         self.low_pays = []                                           # выплаты у пропущенных сигналов
         self.watch = None                                            # все пары под наблюдением (выплата проверяется в момент сигнала)
         self.k = 3.0                                                 # порог силы падения в «разбросах» (флаг --k)
+        self.shadow = []                                             # теневой журнал: ВСЕ сигналы (и поставленные, и пропущенные)
+        self.shadow_path = SHADOW
         self.vol, self.last, self.pairs, self.pays = {}, {}, [], {}
 
     def refresh_pairs(self, symbols):
@@ -135,6 +138,32 @@ class FxBot:
             m = sum(r) / len(r)
             self.vol[symbol] = math.sqrt(sum((x - m) ** 2 for x in r) / (len(r) - 1))
 
+    def settle_shadow(self):
+        """Через срок ставки смотрим, куда ушла цена по каждому записанному сигналу (по закрытию 5-минутной свечи)."""
+        import csv
+        n_bars = MINUTES // 5
+        now = time.time()
+        for sh in list(self.shadow):
+            exit_open = sh["t"] + n_bars * GRAN                      # свеча, закрытие которой = через срок после сигнала
+            if now < exit_open + GRAN + 3:
+                continue
+            try:
+                cs = self.pub.candles(sh["sym"], n_bars + 6)
+            except Exception:  # noqa: BLE001
+                continue
+            ex = [c for t, c in cs if t == exit_open]
+            self.shadow.remove(sh)
+            if not ex or ex[0] == sh["entry"]:
+                continue                                             # перерыв в торговле или ничья — не считаем
+            win = 1 if ex[0] > sh["entry"] else 0
+            new = not os.path.exists(self.shadow_path)
+            with open(self.shadow_path, "a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(["время", "пара", "сила", "вход", "выход", "выиграл"])
+                w.writerow([datetime.fromtimestamp(sh["t"] + GRAN, timezone.utc).strftime("%Y-%m-%d %H:%M"), sh["sym"],
+                            round(sh["z"], 2), sh["entry"], ex[0], win])
+
     def step(self):
         """Проверить закрытые свечи по всем парам; при сигнале — поставить ВВЕРХ на 15 минут (если выплата ещё ≥ порога)."""
         busy = {o.get("base") for o in self.tr.open.values()}
@@ -156,6 +185,7 @@ class FxBot:
             if not sig:
                 continue
             self.cnt["сигналов"] += 1
+            self.shadow.append({"sym": s, "t": cs[-1][0], "entry": cs[-1][1], "z": z})
             if s in busy:
                 self.log(f"  СИГНАЛ {s} ({z:.1f} разброса), но по паре уже есть открытая ставка — пропуск")
                 self.cnt["пропуск: пара занята"] += 1
@@ -227,6 +257,22 @@ def breakdown(path):
     return "\n".join(out)
 
 
+def shadow_text(path):
+    import csv
+    if not os.path.exists(path):
+        return "\n\n👁 Теневой журнал (все сигналы, без денег): пока пуст."
+    with open(path, encoding="utf-8") as f:
+        rows = list(csv.reader(f))[1:]
+    if not rows:
+        return "\n\n👁 Теневой журнал: пока пуст."
+    n, w = len(rows), sum(r[5] == "1" for r in rows)
+    p = w / n
+    lo = (p + 1.96 ** 2 / (2 * n) - 1.96 * math.sqrt(p * (1 - p) / n + 1.96 ** 2 / (4 * n * n))) / (1 + 1.96 ** 2 / n)
+    hi = (p + 1.96 ** 2 / (2 * n) + 1.96 * math.sqrt(p * (1 - p) / n + 1.96 ** 2 / (4 * n * n))) / (1 + 1.96 ** 2 / n)
+    return (f"\n\n👁 Теневой журнал (ВСЕ сигналы, проверка правила без денег): {n} сигналов, цена через срок выше в {w} "
+            f"({100 * p:.1f}%, 95%-интервал {100 * lo:.1f}…{100 * hi:.1f}%). По истории ожидается ~56–57%.")
+
+
 def counters_text(bot):
     if bot is None:
         return ""
@@ -238,7 +284,8 @@ def counters_text(bot):
             "; пропущено: низкая выплата " + str(c["пропуск: низкая выплата"]) + extra +
             ", пара занята " + str(c["пропуск: пара занята"]) + ", лимит открытых " + str(c["пропуск: лимит открытых"]) +
             ", ошибки " + str(c["ошибка ставки"]) +
-            f". Под наблюдением пар: {len(bot.watch or bot.pairs)}, из них сейчас с выплатой ≥ порога: {len(bot.pairs)}.")
+            f". Под наблюдением пар: {len(bot.watch or bot.pairs)}, из них сейчас с выплатой ≥ порога: {len(bot.pairs)}."
+            + shadow_text(bot.shadow_path))
 
 
 def tg_handlers(trader, log_path=None, bot=None):
@@ -352,6 +399,26 @@ def selftest():
     cbot.step()
     ok.append(("сложный процент: ставка 2% от баланса 40 = 0.8", len(ctr.open) == 1 and abs(ctr.stake - 0.8) < 1e-9))
 
+    # теневой журнал: сигнал записан; через 30 мин по свече выхода определяется итог
+    global MINUTES
+    MINUTES = 30
+    import tempfile as _tf
+    bot.shadow_path = os.path.join(_tf.mkdtemp(), "sh.csv")
+    sh0 = dict(bot.shadow[0]) if bot.shadow else None
+    if sh0:
+        exit_open = sh0["t"] + 6 * GRAN
+        pub.data["frxAAA"] = pub.data["frxAAA"] + [(exit_open, sh0["entry"] * 1.001)]
+        bot.shadow = [sh0]
+        real_time = time.time
+        time.time = lambda: exit_open + GRAN + 10
+        try:
+            bot.settle_shadow()
+        finally:
+            time.time = real_time
+    ok.append(("теневой журнал: сигнал записан и через срок засчитан как выигрыш", bool(sh0) and
+               "1 сигналов" in shadow_text(bot.shadow_path).replace("ов, цена", "ов, цена") and "100.0%" in shadow_text(bot.shadow_path)))
+    MINUTES = 15
+
     # команды Telegram: отвечаем только владельцу
     os.environ["TELEGRAM_CHAT_ID"] = "777"
     sent = []
@@ -437,6 +504,7 @@ def main():
                 return
             if not trader.halted:
                 bot.step()
+            bot.settle_shadow()
             getattr(trader.c, "idle_ping", lambda: None)()
             cmds.poll()
             if len(trader.done) >= reported + 25 or time.time() - last_rep > 6 * 3600:
