@@ -117,6 +117,7 @@ class FxBot:
         self.shadow = []                                             # теневой журнал: ВСЕ сигналы (и поставленные, и пропущенные)
         self.shadow_path = SHADOW
         self.vol, self.last, self.pairs, self.pays = {}, {}, [], {}
+        self.vol_t = {}                                              # когда обновлён разброс по паре (обновляем раз в сутки)
 
     def refresh_pairs(self, symbols):
         self.pairs, self.pays, self.errors = [], {}, {}
@@ -132,11 +133,14 @@ class FxBot:
         return self.pays
 
     def refresh_vol(self, symbol):
-        cs = self.pub.candles(symbol, 2000)                         # около недели торговли
-        r = log_returns([c for _, c in cs])
+        """«Обычный разброс» 5-минутных изменений за ~неделю — БЕЗ скачков через перерывы в торговле (ночь, выходные),
+        иначе разрыв пятница→понедельник раздувает разброс, и сигналов становится меньше, чем в истории."""
+        cs = self.pub.candles(symbol, 2000)
+        r = [math.log(b[1] / a[1]) for a, b in zip(cs, cs[1:]) if b[0] - a[0] == GRAN and a[1] > 0 and b[1] > 0]
         if len(r) > 100:
             m = sum(r) / len(r)
             self.vol[symbol] = math.sqrt(sum((x - m) ** 2 for x in r) / (len(r) - 1))
+            self.vol_t[symbol] = time.time()
 
     def settle_shadow(self):
         """Через срок ставки смотрим, куда ушла цена по каждому записанному сигналу (по закрытию 5-минутной свечи)."""
@@ -165,59 +169,77 @@ class FxBot:
                             round(sh["z"], 2), sh["entry"], ex[0], win])
 
     def step(self):
-        """Проверить закрытые свечи по всем парам; при сигнале — поставить ВВЕРХ на 15 минут (если выплата ещё ≥ порога)."""
+        """Проверить новые закрытые свечи по всем парам. Каждый сигнал — в теневой журнал; ставка ВВЕРХ — только по свежему
+        сигналу (последняя закрытая свеча, не позже 90 с после её закрытия) и если выплата ≥ порога."""
         busy = {o.get("base") for o in self.tr.open.values()}
         closed_open = (int(time.time()) // GRAN - 1) * GRAN           # время открытия последней закрытой свечи
         for s in (self.watch or self.pairs):
             if self.last.get(s) == closed_open:                     # эту свечу уже проверили — не тратим запрос
                 continue
-            if s not in self.vol:
-                self.refresh_vol(s)
+            try:
+                if s not in self.vol or time.time() - self.vol_t.get(s, 0) > 86400:
+                    self.refresh_vol(s)
                 if s not in self.vol:
                     continue
-            cs = self.pub.candles(s, 6)
-            if len(cs) < 4 or self.last.get(s) == cs[-1][0]:
+                cs = self.pub.candles(s, 12)
+            except Exception as e:  # noqa: BLE001
+                self.log(f"  {s}: нет данных ({type(e).__name__}: {str(e)[:60]}), проверю на следующем проходе")
                 continue
+            if len(cs) < 4:
+                continue
+            prev = self.last.get(s)
             self.last[s] = cs[-1][0]
-            if any(b[0] - a[0] != GRAN for a, b in zip(cs[-4:], cs[-3:])):   # внутри окна перерыв в торговле (ночь, выходные)
-                continue
-            sig, z = is_signal([c for _, c in cs], self.vol[s], self.k)
-            if not sig:
-                continue
-            self.cnt["сигналов"] += 1
-            self.shadow.append({"sym": s, "t": cs[-1][0], "entry": cs[-1][1], "z": z})
-            if s in busy:
-                self.log(f"  СИГНАЛ {s} ({z:.1f} разброса), но по паре уже есть открытая ставка — пропуск")
-                self.cnt["пропуск: пара занята"] += 1
-                continue
-            if self.max_open and len(self.tr.open) >= self.max_open:
-                self.log(f"  СИГНАЛ {s} ({z:.1f}), но открыто уже {len(self.tr.open)} ставок (лимит {self.max_open}) — пропуск")
-                self.cnt["пропуск: лимит открытых"] += 1
-                continue
+            # все свечи, которые ещё не проверяли (если бот отстал — несколько)
+            idx = [j for j in range(3, len(cs)) if prev is None and j == len(cs) - 1 or prev is not None and cs[j][0] > prev]
+            for j in idx:
+                win4 = cs[j - 3:j + 1]
+                if any(y[0] - x[0] != GRAN for x, y in zip(win4, win4[1:])):   # внутри окна перерыв в торговле
+                    continue
+                sig, z = is_signal([c for _, c in win4], self.vol[s], self.k)
+                if not sig:
+                    continue
+                self.cnt["сигналов"] += 1
+                self.shadow.append({"sym": s, "t": cs[j][0], "entry": cs[j][1], "z": z})
+                fresh = j == len(cs) - 1 and time.time() - (cs[j][0] + GRAN) < 90
+                if not fresh:
+                    self.log(f"  СИГНАЛ {s} ({z:.1f}) обнаружен с опозданием — только в теневой журнал")
+                    self.cnt["пропуск: опоздание"] = self.cnt.get("пропуск: опоздание", 0) + 1
+                    continue
+                self._maybe_bet(s, z, cs[j][1], busy)
+
+    def _maybe_bet(self, s, z, price, busy):
+        if s in busy:
+            self.log(f"  СИГНАЛ {s} ({z:.1f} разброса), но по паре уже есть открытая ставка — пропуск")
+            self.cnt["пропуск: пара занята"] += 1
+            return
+        if self.max_open and len(self.tr.open) >= self.max_open:
+            self.log(f"  СИГНАЛ {s} ({z:.1f}), но открыто уже {len(self.tr.open)} ставок (лимит {self.max_open}) — пропуск")
+            self.cnt["пропуск: лимит открытых"] += 1
+            return
+        try:
+            p = payout_15m(self.tr.c, self.tr.currency, s, self.tr.stake)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"  СИГНАЛ {s}, но цену ставки получить не удалось: {str(e)[:80]}")
+            return
+        if p < self.min_payout:
+            self.log(f"  СИГНАЛ {s} ({z:.1f}), но выплата сейчас {100 * p:.0f}% < {100 * self.min_payout:.0f}% — пропуск")
+            self.cnt["пропуск: низкая выплата"] += 1
+            self.low_pays.append(p)
+            return
+        if self.stake_pct:                                      # ставка = доля текущего баланса, в пределах [мин, макс]
             try:
-                p = payout_15m(self.tr.c, self.tr.currency, s, self.tr.stake)
-            except Exception as e:  # noqa: BLE001
-                self.log(f"  СИГНАЛ {s}, но цену ставки получить не удалось: {str(e)[:80]}")
-                continue
-            if p < self.min_payout:
-                self.log(f"  СИГНАЛ {s} ({z:.1f}), но выплата сейчас {100 * p:.0f}% < {100 * self.min_payout:.0f}% — пропуск")
-                self.cnt["пропуск: низкая выплата"] += 1
-                self.low_pays.append(p)
-                continue
-            if self.stake_pct:                                      # ставка = доля текущего баланса, в пределах [мин, макс]
-                try:
-                    bal = float(self.tr.c.call({"balance": 1})["balance"]["balance"])
-                    self.tr.stake = round(min(self.stake_max, max(self.stake_min, self.stake_pct * bal)), 2)
-                except Exception:  # noqa: BLE001
-                    self.tr.stake = self.stake_min
-            self.log(f"  СИГНАЛ {s}: падение {z:.1f} разброса за 15 мин, выплата {100 * p:.0f}% → ВВЕРХ на {MINUTES} мин, "
-                     f"ставка {self.tr.stake}")
-            try:
-                if self.tr.place(s, 1, cs[-1][1], symbol=s):
-                    self.cnt["поставлено"] += 1
-            except Exception as e:  # noqa: BLE001
-                self.log(f"  {s}: ставка не прошла: {str(e)[:120]}")
-                self.cnt["ошибка ставки"] += 1
+                bal = float(self.tr.c.call({"balance": 1})["balance"]["balance"])
+                self.tr.stake = round(min(self.stake_max, max(self.stake_min, self.stake_pct * bal)), 2)
+            except Exception:  # noqa: BLE001
+                self.tr.stake = self.stake_min
+        self.log(f"  СИГНАЛ {s}: падение {z:.1f} разброса за 15 мин, выплата {100 * p:.0f}% → ВВЕРХ на {MINUTES} мин, "
+                 f"ставка {self.tr.stake}")
+        try:
+            if self.tr.place(s, 1, price, symbol=s):
+                self.cnt["поставлено"] += 1
+        except Exception as e:  # noqa: BLE001
+            self.log(f"  {s}: ставка не прошла: {str(e)[:120]}")
+            self.cnt["ошибка ставки"] += 1
 
 
 def breakdown(path):
@@ -283,7 +305,7 @@ def counters_text(bot):
     return ("\n\nС запуска бота: сигналов " + str(c["сигналов"]) + ", поставлено " + str(c["поставлено"]) +
             "; пропущено: низкая выплата " + str(c["пропуск: низкая выплата"]) + extra +
             ", пара занята " + str(c["пропуск: пара занята"]) + ", лимит открытых " + str(c["пропуск: лимит открытых"]) +
-            ", ошибки " + str(c["ошибка ставки"]) +
+            ", опоздание " + str(c.get("пропуск: опоздание", 0)) + ", ошибки " + str(c["ошибка ставки"]) +
             f". Под наблюдением пар: {len(bot.watch or bot.pairs)}, из них сейчас с выплатой ≥ порога: {len(bot.pairs)}."
             + shadow_text(bot.shadow_path))
 
@@ -343,7 +365,7 @@ def selftest():
     ok.append((f"резкое падение — сигнал есть (z={z:.1f})", sig))
 
     # 2) полный проход на имитации: публичные свечи и демо-клиент
-    now = int(time.time()) // GRAN * GRAN
+    now = int(time.time()) - 5                                      # последняя свеча закрылась 5 с назад («свежий» сигнал)
 
     class FakePub:
         def __init__(self):
@@ -398,6 +420,20 @@ def selftest():
     cbot.refresh_pairs(["frxAAA"])
     cbot.step()
     ok.append(("сложный процент: ставка 2% от баланса 40 = 0.8", len(ctr.open) == 1 and abs(ctr.stake - 0.8) < 1e-9))
+
+    # бот отстал: сигнал был в предыдущей свече, а последняя закрытая — уже следующая → только теневой журнал, без ставки
+    lag_pub = FakePub()
+    lag_pub.data["frxLAG"] = base + [(now - 5 * GRAN, closes[-1]), (now - 4 * GRAN, crash[-3]), (now - 3 * GRAN, crash[-2]),
+                                     (now - 2 * GRAN, crash[-1]), (now - GRAN, closes[-1])]   # последняя свеча — уже отскок
+    ltr = B.Trader(B.FakeClient(), 1, 15, 10 ** 9, 20, log=lambda *a: None, unit="m")
+    lbot = FxBot(lag_pub, ltr, 0.85, log=msgs.append)
+    lbot.refresh_pairs(["frxLAG"])
+    lbot.vol["frxLAG"] = vol
+    lbot.vol_t["frxLAG"] = time.time()
+    lbot.last["frxLAG"] = now - 5 * GRAN                            # последняя проверенная — до падения
+    lbot.step()
+    ok.append(("бот отстал: старый сигнал записан в теневой журнал, но без ставки", lbot.cnt["сигналов"] >= 1
+               and not ltr.open and lbot.cnt.get("пропуск: опоздание", 0) >= 1))
 
     # теневой журнал: сигнал записан; через 30 мин по свече выхода определяется итог
     global MINUTES
@@ -492,7 +528,6 @@ def main():
             if time.time() - last_pairs > 2 * 3600:
                 bot.refresh_pairs(symbols)
                 bot.watch = sorted(set(bot.watch or []) | set(bot.pays))
-                bot.vol.clear()
                 last_pairs = time.time()
                 print(datetime.now().strftime("[%H:%M] ") + f"пары с выплатой ≥{100 * a.min_payout:.0f}%: {', '.join(bot.pairs) or 'нет'}")
             if trader.open and time.time() - last_poll >= 20:            # итоги ставок проверяем раз в 20 с (не чаще — лимиты Deriv)
