@@ -1,0 +1,7 @@
+ccxt
+pandas
+numpy
+python-dotenv
+requests
+# необязательно, для binary_research.py --gbm:
+# scikit-learn
