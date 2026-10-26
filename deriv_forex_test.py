@@ -122,17 +122,22 @@ def features(c, h, ts=None, gran=300):
                 tr4 = np.nan
             if t < 147 or gaps[t] != gaps[t - 144]:
                 tr12 = np.nan
-        Z.append((w[-3:].sum(), z6, z12, tr4, tr12))                # изменения за 15 / 30 / 60 мин и тренды 4 ч / 12 ч
-    return np.array(X), np.array(Y), np.array(Z).reshape(-1, 5)
+        hour = (ts[t] % 86400) / 3600 if ts is not None else np.nan  # час сигнала по Гринвичу
+        Z.append((w[-3:].sum(), z6, z12, tr4, tr12, hour))          # изменения 15/30/60 мин, тренды 4/12 ч, час
+    return np.array(X), np.array(Y), np.array(Z).reshape(-1, 6)
 
 
-def walk(X, Y, Z, h, folds=5):
+def walk(X, Y, Z, h, folds=5, cross=None):
     n = len(Y)
     edges = np.linspace(0, n, folds + 1).astype(int)
     res = {"модель, все": [], "модель, уверенные 20%": [], "откат: падение >3 разбросов за 15м → вверх": [],
            "откат: рост >3 разбросов за 15м → вниз": [], "всегда вверх": [],
            "откат при тренде 4ч ВВЕРХ → вверх": [], "откат при тренде 4ч ВНИЗ → вверх": [],
            "откат при тренде 12ч ВВЕРХ → вверх": [], "откат при тренде 12ч ВНИЗ → вверх": [],
+           "откат+тренд12↑ и тренд4↑ (оба) → вверх": [],
+           "откат+тренд12↑, 00–07 UTC (ночь Азия)": [], "откат+тренд12↑, 07–12 UTC (Лондон)": [],
+           "откат+тренд12↑, 12–17 UTC (Лондон+НЙ)": [], "откат+тренд12↑, 17–24 UTC (вечер)": [],
+           "откат+тренд12↑, только КРОССЫ": [], "откат+тренд12↑, только пары с USD": [],
            "откат: взлёт при тренде 4ч ВНИЗ → вниз": [], "откат: взлёт при тренде 4ч ВВЕРХ → вниз": [],
            "откат: взлёт при тренде 12ч ВНИЗ → вниз": [], "откат: взлёт при тренде 12ч ВВЕРХ → вниз": [],
            "откат: падение >3 за 30м (новые) → вверх": [], "откат: падение >3 за 60м (новые) → вверх": [],
@@ -159,6 +164,19 @@ def walk(X, Y, Z, h, folds=5):
         dip60 = (np.nan_to_num(Zt[:, 2], nan=0) <= -3 * np.sqrt(12)) & ~dip & ~dip30
         res["откат: падение >3 за 30м (новые) → вверх"].append((int(y[dip30].sum()), int(dip30.sum())))
         res["откат: падение >3 за 60м (новые) → вверх"].append((int(y[dip60].sum()), int(dip60.sum())))
+        t12 = Zt[:, 4]
+        ok12 = ~np.isnan(t12)
+        base = dip & ok12 & (t12 > 0)                               # бот сейчас: падение + тренд 12 ч вверх
+        both = base & ~np.isnan(Zt[:, 3]) & (Zt[:, 3] > 0)
+        res["откат+тренд12↑ и тренд4↑ (оба) → вверх"].append((int(y[both].sum()), int(both.sum())))
+        hr = Zt[:, 5]
+        for lo, hi, nm in ((0, 7, "00–07 UTC (ночь Азия)"), (7, 12, "07–12 UTC (Лондон)"), (12, 17, "12–17 UTC (Лондон+НЙ)"),
+                           (17, 24, "17–24 UTC (вечер)")):
+            m = base & (hr >= lo) & (hr < hi)
+            res[f"откат+тренд12↑, {nm}"].append((int(y[m].sum()), int(m.sum())))
+        if cross is not None:
+            key = "откат+тренд12↑, только КРОССЫ" if cross else "откат+тренд12↑, только пары с USD"
+            res[key].append((int(y[base].sum()), int(base.sum())))
         for col, tname in ((3, "4ч"), (4, "12ч")):
             tr = Zt[:, col]
             ok_tr = ~np.isnan(tr)
@@ -286,7 +304,7 @@ def run_one(symbol, candles, payout, synthetic, total):
     print(f"\n{symbol}: {len(c)} свечей. Доля угаданных на будущих кусках истории (4 куска).")
     for h, mnt in ((3, 15), (6, 30), (12, 60)):
         X, Y, Z = features(c, h, ts)
-        res = walk(X, Y, Z, h)
+        res = walk(X, Y, Z, h, cross=("USD" not in symbol) if not synthetic else None)
         pay = pays.get(mnt)
         be = 1 / (1 + pay) if pay else None
         head = f"\nСрок {mnt} мин" + (f": выплата Deriv {100 * pay:.0f}%, порог безубыточности {100 * be:.1f}%" if be else
