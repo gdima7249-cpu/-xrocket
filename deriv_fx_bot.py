@@ -785,7 +785,7 @@ def main():
     reported = 0
     while True:
         try:
-            if time.time() - last_pairs > 2 * 3600:
+            if time.time() - last_pairs > (600 if bot.errors else 2 * 3600):   # пары без выплаты (перерыв Deriv) — проверяем чаще
                 bot.refresh_pairs(symbols)
                 bot.watch = sorted(set(bot.watch or []) | set(bot.pays))
                 last_pairs = time.time()
