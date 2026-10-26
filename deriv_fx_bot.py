@@ -159,14 +159,15 @@ class FxBot:
             self.shadow.remove(sh)
             if not ex or ex[0] == sh["entry"]:
                 continue                                             # перерыв в торговле или ничья — не считаем
-            win = 1 if ex[0] > sh["entry"] else 0
+            up = sh.get("dir", 1) == 1
+            win = 1 if (ex[0] > sh["entry"]) == up else 0
             new = not os.path.exists(self.shadow_path)
             with open(self.shadow_path, "a", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
                 if new:
-                    w.writerow(["время", "пара", "сила", "вход", "выход", "выиграл"])
+                    w.writerow(["время", "пара", "сила", "вход", "выход", "выиграл", "правило"])
                 w.writerow([datetime.fromtimestamp(sh["t"] + GRAN, timezone.utc).strftime("%Y-%m-%d %H:%M"), sh["sym"],
-                            round(sh["z"], 2), sh["entry"], ex[0], win])
+                            round(sh["z"], 2), sh["entry"], ex[0], win, "падение→вверх" if up else "рост→вниз"])
 
     def step(self):
         """Проверить новые закрытые свечи по всем парам. Каждый сигнал — в теневой журнал; ставка ВВЕРХ — только по свежему
@@ -196,10 +197,13 @@ class FxBot:
                 if any(y[0] - x[0] != GRAN for x, y in zip(win4, win4[1:])):   # внутри окна перерыв в торговле
                     continue
                 sig, z = is_signal([c for _, c in win4], self.vol[s], self.k)
+                if z >= self.k:                                     # резкий ВЗЛЁТ: только теневой журнал (проверка «рост → вниз», без ставок)
+                    self.shadow.append({"sym": s, "t": cs[j][0], "entry": cs[j][1], "z": z, "dir": -1})
+                    self.cnt["взлётов (только тень)"] = self.cnt.get("взлётов (только тень)", 0) + 1
                 if not sig:
                     continue
                 self.cnt["сигналов"] += 1
-                self.shadow.append({"sym": s, "t": cs[j][0], "entry": cs[j][1], "z": z})
+                self.shadow.append({"sym": s, "t": cs[j][0], "entry": cs[j][1], "z": z, "dir": 1})
                 fresh = j == len(cs) - 1 and time.time() - (cs[j][0] + GRAN) < 90
                 if not fresh:
                     self.log(f"  СИГНАЛ {s} ({z:.1f}) обнаружен с опозданием — только в теневой журнал")
@@ -287,12 +291,22 @@ def shadow_text(path):
         rows = list(csv.reader(f))[1:]
     if not rows:
         return "\n\n👁 Теневой журнал: пока пуст."
-    n, w = len(rows), sum(r[5] == "1" for r in rows)
-    p = w / n
-    lo = (p + 1.96 ** 2 / (2 * n) - 1.96 * math.sqrt(p * (1 - p) / n + 1.96 ** 2 / (4 * n * n))) / (1 + 1.96 ** 2 / n)
-    hi = (p + 1.96 ** 2 / (2 * n) + 1.96 * math.sqrt(p * (1 - p) / n + 1.96 ** 2 / (4 * n * n))) / (1 + 1.96 ** 2 / n)
-    return (f"\n\n👁 Теневой журнал (ВСЕ сигналы, проверка правила без денег): {n} сигналов, цена через срок выше в {w} "
-            f"({100 * p:.1f}%, 95%-интервал {100 * lo:.1f}…{100 * hi:.1f}%). По истории ожидается ~56–57%.")
+
+    def part(rs, name, expect):
+        n, w = len(rs), sum(r[5] == "1" for r in rs)
+        if not n:
+            return f"\n  {name}: пока нет сигналов."
+        p = w / n
+        z2 = 1.96 ** 2
+        lo = (p + z2 / (2 * n) - 1.96 * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))) / (1 + z2 / n)
+        hi = (p + z2 / (2 * n) + 1.96 * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))) / (1 + z2 / n)
+        return f"\n  {name}: {n} сигналов, угадано {w} ({100 * p:.1f}%, 95%-интервал {100 * lo:.1f}…{100 * hi:.1f}%). {expect}"
+
+    down = [r for r in rows if len(r) < 7 or r[6] == "падение→вверх"]
+    pump = [r for r in rows if len(r) >= 7 and r[6] == "рост→вниз"]
+    return ("\n\n👁 Теневой журнал (ВСЕ сигналы, проверка без денег):"
+            + part(down, "падение → вверх (бот ставит)", "По истории ~56–57%.")
+            + part(pump, "рост → вниз (только наблюдение)", "По истории ~54%, нужно 56%+."))
 
 
 def counters_text(bot):
@@ -306,6 +320,7 @@ def counters_text(bot):
             "; пропущено: низкая выплата " + str(c["пропуск: низкая выплата"]) + extra +
             ", пара занята " + str(c["пропуск: пара занята"]) + ", лимит открытых " + str(c["пропуск: лимит открытых"]) +
             ", опоздание " + str(c.get("пропуск: опоздание", 0)) + ", ошибки " + str(c["ошибка ставки"]) +
+            "; резких взлётов (только тень): " + str(c.get("взлётов (только тень)", 0)) +
             f". Под наблюдением пар: {len(bot.watch or bot.pairs)}, из них сейчас с выплатой ≥ порога: {len(bot.pairs)}."
             + shadow_text(bot.shadow_path))
 
