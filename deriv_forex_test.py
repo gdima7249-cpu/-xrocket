@@ -43,13 +43,28 @@ def fetch_candles(symbol, total, gran=300, ws=None, pause=2.0):
     if own:
         import websocket
         ws = websocket.create_connection(T.WS_URL, timeout=30)
-    seen, end, req, stalled, waits = {}, "latest", 0, 0, 0
+    seen, end, req, stalled, waits, drops = {}, "latest", 0, 0, 0, 0
     try:
         while len(seen) < total and req < 200 and stalled < 3:
-            ws.send(json.dumps({"ticks_history": symbol, "style": "candles", "granularity": gran, "count": 5000,
-                                "end": end, "adjust_start_time": 1}))
-            req += 1
-            msg = json.loads(ws.recv())
+            try:
+                ws.send(json.dumps({"ticks_history": symbol, "style": "candles", "granularity": gran, "count": 5000,
+                                    "end": end, "adjust_start_time": 1}))
+                req += 1
+                msg = json.loads(ws.recv())
+            except Exception as e:  # noqa: BLE001  (Deriv закрыл соединение, например во время ожидания лимита)
+                if not own or drops >= 5:
+                    raise
+                drops += 1
+                print(f"  связь с Deriv оборвалась ({type(e).__name__}), переподключаюсь через 10 с... "
+                      f"(уже скачано {len(seen)} свечей)")
+                time.sleep(10)
+                try:
+                    ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                import websocket
+                ws = websocket.create_connection(T.WS_URL, timeout=30)
+                continue
             if msg.get("error"):
                 text = str(msg["error"].get("message", ""))
                 if "rate limit" in text.lower() and waits < 10:
@@ -373,8 +388,8 @@ def main():
             time.sleep(60)
         try:
             run_one(sym, a.candles, a.payout, a.synthetic, total)
-        except SystemExit as e:
-            print(f"{sym}: {e}")
+        except (SystemExit, Exception) as e:                          # одна пара не должна обрывать всю проверку
+            print(f"{sym}: пропускаю — {type(e).__name__}: {str(e)[:150]}")
     confidence_report()
     if len(syms) > 1:
         print("\nОБЩИЙ ИТОГ правил отката по всем парам:")
