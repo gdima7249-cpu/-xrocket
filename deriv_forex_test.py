@@ -28,6 +28,7 @@ def fetch_candles(symbol, total, gran=300, ws=None, pause=2.0):
     """5-минутные свечи (по 5000 за запрос, назад во времени), без дублей, по возрастанию времени: (время, close).
     Deriv ограничивает частоту таких запросов: между запросами пауза, при упоре в лимит — ожидание и повтор.
     Скачанное сохраняется в research_cache (при повторном запуске в течение суток берётся оттуда)."""
+    global LAST_DOWNLOADED
     import os
     os.makedirs("research_cache", exist_ok=True)
     path = f"research_cache/DERIV_{symbol}_{gran}s_{total}.json"
@@ -35,10 +36,8 @@ def fetch_candles(symbol, total, gran=300, ws=None, pause=2.0):
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
         print(f"Свечи {symbol} взяты из кэша: {len(d['t'])}")
-        global LAST_DOWNLOADED
         LAST_DOWNLOADED = False
         return np.array(d["t"]), np.array(d["c"])
-    global LAST_DOWNLOADED
     LAST_DOWNLOADED = True
     own = ws is None
     if own:
