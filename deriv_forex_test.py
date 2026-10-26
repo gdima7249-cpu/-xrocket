@@ -35,7 +35,11 @@ def fetch_candles(symbol, total, gran=300, ws=None, pause=2.0):
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
         print(f"Свечи {symbol} взяты из кэша: {len(d['t'])}")
+        global LAST_DOWNLOADED
+        LAST_DOWNLOADED = False
         return np.array(d["t"]), np.array(d["c"])
+    global LAST_DOWNLOADED
+    LAST_DOWNLOADED = True
     own = ws is None
     if own:
         import websocket
@@ -83,6 +87,7 @@ def fetch_candles(symbol, total, gran=300, ws=None, pause=2.0):
 
 
 DELAY = 0
+LAST_DOWNLOADED = False                                              # последняя пара качалась с Deriv (а не из кэша)
 
 
 def features(c, h, ts=None, gran=300):
@@ -329,7 +334,7 @@ def main():
     total = {}
     syms = a.symbol.split(",")
     for i, sym in enumerate(syms):
-        if i and not a.synthetic:
+        if i and not a.synthetic and LAST_DOWNLOADED:
             print("\n(пауза 60 с между парами, чтобы не упереться в лимит Deriv)")
             time.sleep(60)
         try:
