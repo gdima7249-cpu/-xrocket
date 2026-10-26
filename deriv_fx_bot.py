@@ -200,7 +200,9 @@ class FxBot:
                     continue
                 sig, z = is_signal([c for _, c in win4], self.vol[s], self.k)
                 if z >= self.k:                                     # резкий ВЗЛЁТ: только теневой журнал (проверка «рост → вниз», без ставок)
-                    self.shadow.append({"sym": s, "t": cs[j][0], "entry": cs[j][1], "z": z, "dir": -1})
+                    trp = self.trend12(s, cs[j][0])
+                    self.shadow.append({"sym": s, "t": cs[j][0], "entry": cs[j][1], "z": z, "dir": -1,
+                                        "trend": "вверх" if trp is not None and trp > 0 else "вниз" if trp is not None else "?"})
                     self.cnt["взлётов (только тень)"] = self.cnt.get("взлётов (только тень)", 0) + 1
                 if not sig:
                     continue
@@ -334,7 +336,9 @@ def shadow_text(path):
             + part(down, "падение → вверх, все", "По истории ~57%.")
             + part(d_up, "   из них тренд 12ч ВВЕРХ (бот ставит)", "По истории ~60%.")
             + part(d_dn, "   из них тренд 12ч вниз (без ставок)", "По истории ~54%.")
-            + part(pump, "рост → вниз (только наблюдение)", "По истории ~54%, нужно 56%+."))
+            + part(pump, "рост → вниз, все (только наблюдение)", "По истории ~54%.")
+            + part([r for r in pump if len(r) >= 8 and r[7] == "вниз"], "   из них тренд 12ч ВНИЗ", "Нужно 57%+.")
+            + part([r for r in pump if len(r) >= 8 and r[7] == "вверх"], "   из них тренд 12ч вверх", ""))
 
 
 def counters_text(bot):
