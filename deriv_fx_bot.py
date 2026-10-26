@@ -513,7 +513,27 @@ def main():
     if a.scan:
         return
     if not bot.pays:
-        raise SystemExit("Deriv не дал выплату ни по одной паре (рынок закрыт?). Попробуйте позже.")
+        # рынок закрыт (выходные): не выходим — ждём открытия, всё это время отвечаем на кнопки в Telegram
+        msg = "Рынок закрыт (Deriv не даёт ставок). Жду открытия, проверяю раз в 10 минут."
+        if bot.errors:
+            msg += " Ответ Deriv: " + next(iter(bot.errors.values()))[:120]
+        print(msg)
+        tg_notify.send("⏸ " + msg)
+        wait_cmds = tg_notify.Commands(tg_handlers(trader, bot=bot))
+        last_try = time.time()
+        while not bot.pays:
+            try:
+                wait_cmds.poll()
+                getattr(trader.c, "idle_ping", lambda: None)()
+                if time.time() - last_try > 600:
+                    bot.refresh_pairs(symbols)
+                    last_try = time.time()
+            except KeyboardInterrupt:
+                return
+            except Exception as e:  # noqa: BLE001
+                print(f"  ожидание: {type(e).__name__}: {str(e)[:100]}")
+            time.sleep(5)
+        print(datetime.now().strftime("[%H:%M] ") + "рынок открылся.")
     print(f"\nРаботает на ДЕМО: {len(bot.pairs)} пар, ставка {a.stake}, лимит потерь {a.max_loss}. Ctrl+C — стоп.")
     tg_notify.send(f"▶️ Deriv-бот (валюты) запущен на ДЕМО: {len(bot.pairs)} пар, ставка {a.stake}, срок {a.minutes} мин.\n"
                    "Кнопки внизу: 💰 Баланс, 📈 Текущие ставки, 📜 История.")
