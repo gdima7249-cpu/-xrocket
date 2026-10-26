@@ -84,9 +84,10 @@ class Public:
 MINUTES = 15                                                         # срок ставки (меняется флагом --minutes)
 
 
-def payout_15m(client, currency, symbol, stake=10.0):
-    """Выплата в долях ставки для CALL на MINUTES минут — на ТОЙ сумме, которую бот реально ставит (на малых ставках она ниже)."""
-    pr = client.call({"proposal": 1, "amount": stake, "basis": "stake", "contract_type": "CALL", "currency": currency,
+def payout_15m(client, currency, symbol, stake=10.0, direction=1):
+    """Выплата в долях ставки для CALL (PUT при direction=-1) на MINUTES минут — на ТОЙ сумме, которую бот реально ставит."""
+    pr = client.call({"proposal": 1, "amount": stake, "basis": "stake", "contract_type": "CALL" if direction > 0 else "PUT",
+                      "currency": currency,
                       "duration": MINUTES, "duration_unit": "m", "underlying_symbol": symbol})["proposal"]
     return float(pr["payout"]) / float(pr["ask_price"]) - 1
 
@@ -124,6 +125,7 @@ class FxBot:
         self.usd_pairs = False                                       # пары с долларом: только тень (флаг --with-usd — ставить и на них)
         self.evening_hours, self.evening_x = (17, 24), 1.0           # вечер (UTC, 20:00–03:00 мск): ставка × evening_x (флаг --evening-x)
         self.only_evening = False                                    # ставить только вечером, днём — только тень (флаг --only-evening)
+        self.evening_all = False                                     # вечером ставить и при тренде вниз: падение → вверх, взлёт → вниз
         self.shadow = []                                             # теневой журнал: ВСЕ сигналы (и поставленные, и пропущенные)
         self.shadow_path = SHADOW
         self.vol, self.last, self.pairs, self.pays = {}, {}, [], {}
@@ -208,27 +210,34 @@ class FxBot:
                 if any(y[0] - x[0] != GRAN for x, y in zip(win4, win4[1:])):   # внутри окна перерыв в торговле
                     continue
                 sig, z = is_signal([c for _, c in win4], self.vol[s], self.k)
-                if z >= self.k:                                     # резкий ВЗЛЁТ: только теневой журнал (проверка «рост → вниз», без ставок)
+                hour = ((cs[j][0] + GRAN) % 86400) // 3600              # час закрытия сигнальной свечи (UTC)
+                news = bool(self.skip_hours) and self.skip_hours[0] <= hour < self.skip_hours[1]
+                evening = self.evening_hours[0] <= hour < self.evening_hours[1]
+                fresh = j == len(cs) - 1 and time.time() - (cs[j][0] + GRAN) < 90
+                session = "новости" if news else "вечер" if evening else "спокойно"
+                if z >= self.k:                                     # резкий ВЗЛЁТ: в тень; вечером при тренде вниз (--evening-all) — ставка ВНИЗ
                     trp = self.trend12(s, cs[j][0])
                     self.shadow.append({"sym": s, "t": cs[j][0], "entry": cs[j][1], "z": z, "dir": -1,
-                                        "trend": "вверх" if trp is not None and trp > 0 else "вниз" if trp is not None else "?"})
+                                        "trend": "вверх" if trp is not None and trp > 0 else "вниз" if trp is not None else "?",
+                                        "session": session})
                     self.cnt["взлётов (только тень)"] = self.cnt.get("взлётов (только тень)", 0) + 1
+                    if (self.evening_all and evening and fresh and not news and trp is not None and trp < 0
+                            and (self.usd_pairs or not is_usd(s))):
+                        self.cnt["вечерних взлётов → ставка вниз"] = self.cnt.get("вечерних взлётов → ставка вниз", 0) + 1
+                        self._maybe_bet(s, z, cs[j][1], busy, self.evening_x, direction=-1)
                 if not sig:
                     continue
                 self.cnt["сигналов"] += 1
                 tr = self.trend12(s, cs[j][0])
-                hour = ((cs[j][0] + GRAN) % 86400) // 3600              # час закрытия сигнальной свечи (UTC)
-                news = bool(self.skip_hours) and self.skip_hours[0] <= hour < self.skip_hours[1]
-                evening = self.evening_hours[0] <= hour < self.evening_hours[1]
                 self.shadow.append({"sym": s, "t": cs[j][0], "entry": cs[j][1], "z": z, "dir": 1,
                                     "trend": "вверх" if tr is not None and tr > 0 else "вниз" if tr is not None else "?",
-                                    "session": "новости" if news else "вечер" if evening else "спокойно"})
-                fresh = j == len(cs) - 1 and time.time() - (cs[j][0] + GRAN) < 90
+                                    "session": session})
                 if not fresh:
                     self.log(f"  СИГНАЛ {s} ({z:.1f}) обнаружен с опозданием — только в теневой журнал")
                     self.cnt["пропуск: опоздание"] = self.cnt.get("пропуск: опоздание", 0) + 1
                     continue
-                if self.trend_filter and not (tr is not None and tr > 0):
+                evening_dn = self.evening_all and evening and tr is not None and tr < 0   # вечер: падение и при тренде вниз
+                if self.trend_filter and not (tr is not None and tr > 0) and not evening_dn:
                     self.log(f"  СИГНАЛ {s} ({z:.1f}), но тренд за 12 ч не вверх — только теневой журнал")
                     self.cnt["пропуск: тренд не вверх"] = self.cnt.get("пропуск: тренд не вверх", 0) + 1
                     continue
@@ -262,7 +271,7 @@ class FxBot:
             return None
         return math.log(cs[j - 3][1] / cs[j - 144][1])
 
-    def _maybe_bet(self, s, z, price, busy, mult=1.0):
+    def _maybe_bet(self, s, z, price, busy, mult=1.0, direction=1):
         if s in busy:
             self.log(f"  СИГНАЛ {s} ({z:.1f} разброса), но по паре уже есть открытая ставка — пропуск")
             self.cnt["пропуск: пара занята"] += 1
@@ -272,7 +281,7 @@ class FxBot:
             self.cnt["пропуск: лимит открытых"] += 1
             return
         try:
-            p = payout_15m(self.tr.c, self.tr.currency, s, self.tr.stake)
+            p = payout_15m(self.tr.c, self.tr.currency, s, self.tr.stake, direction)
         except Exception as e:  # noqa: BLE001
             self.log(f"  СИГНАЛ {s}, но цену ставки получить не удалось: {str(e)[:80]}")
             return
@@ -290,10 +299,11 @@ class FxBot:
         base = self.tr.stake
         if mult != 1.0:                                         # вечером ставка крупнее (только на эту ставку)
             self.tr.stake = round(base * mult, 2)
-        self.log(f"  СИГНАЛ {s}: падение {z:.1f} разброса за 15 мин, выплата {100 * p:.0f}% → ВВЕРХ на {MINUTES} мин, "
+        self.log(f"  СИГНАЛ {s}: {'падение' if direction > 0 else 'взлёт'} {abs(z):.1f} разброса за 15 мин, выплата {100 * p:.0f}% "
+                 f"→ {'ВВЕРХ' if direction > 0 else 'ВНИЗ'} на {MINUTES} мин, "
                  f"ставка {self.tr.stake}" + (f" (вечер ×{mult:g})" if mult != 1.0 else ""))
         try:
-            if self.tr.place(s, 1, price, symbol=s):
+            if self.tr.place(s, direction, price, symbol=s):
                 self.cnt["поставлено"] += 1
         except Exception as e:  # noqa: BLE001
             self.log(f"  {s}: ставка не прошла: {str(e)[:120]}")
@@ -376,7 +386,11 @@ def shadow_text(path):
                    "      тренд вверх, вне новостей, пары с $ (без ставок)", "По истории ~55% (все сигналы).")
             + part([r for r in d_up if len(r) >= 9 and r[8] == "новости"], "      тренд вверх, 15–20 мск (новости, без ставок)",
                    "По истории ~51%.")
+            + part([r for r in d_dn if len(r) >= 9 and r[8] == "вечер" and not is_usd(r[1])],
+                   "   падение, тренд вниз, ВЕЧЕР, кроссы (ставит с --evening-all)", "По истории ~64%.")
             + part(pump, "рост → вниз, все (только наблюдение)", "По истории ~54%.")
+            + part([r for r in pump if len(r) >= 9 and r[7] == "вниз" and r[8] == "вечер" and not is_usd(r[1])],
+                   "   взлёт, тренд вниз, ВЕЧЕР, кроссы (ставит ВНИЗ с --evening-all)", "По истории ~72%.")
             + part([r for r in pump if len(r) >= 8 and r[7] == "вниз"], "   из них тренд 12ч ВНИЗ", "Нужно 57%+.")
             + part([r for r in pump if len(r) >= 8 and r[7] == "вверх"], "   из них тренд 12ч вверх", ""))
 
@@ -394,6 +408,7 @@ def counters_text(bot):
             ", тренд не вверх " + str(c.get("пропуск: тренд не вверх", 0)) +
             ", часы новостей " + str(c.get("пропуск: часы новостей", 0)) +
             ", не вечер " + str(c.get("пропуск: не вечер", 0)) +
+            "; вечерних взлётов → ставка вниз " + str(c.get("вечерних взлётов → ставка вниз", 0)) +
             ", пара с долларом " + str(c.get("пропуск: пара с долларом", 0)) +
             ", опоздание " + str(c.get("пропуск: опоздание", 0)) + ", ошибки " + str(c["ошибка ставки"]) +
             "; резких взлётов (только тень): " + str(c.get("взлётов (только тень)", 0)) +
@@ -415,7 +430,7 @@ def tg_handlers(trader, log_path=None, bot=None):
         if not trader.open:
             return "📈 Открытых ставок нет."
         now = time.time()
-        rows = [f"{o['base'].replace('frx', '')}: ВВЕРХ, ставка {o['stake']}, выплата {o['payout']:.2f}, "
+        rows = [f"{o['base'].replace('frx', '')}: {'ВВЕРХ' if o.get('dir', 1) > 0 else 'ВНИЗ'}, ставка {o['stake']}, выплата {o['payout']:.2f}, "
                 f"до закрытия ~{max(0, int((o['t'] + trader.expiry * 60 - now) // 60))} мин" for o in trader.open.values()]
         return f"📈 Открытые ставки ({len(rows)}):\n" + "\n".join(rows)
 
@@ -600,6 +615,37 @@ def selftest():
     ok.append(("только вечер: днём без ставки, только тень", not otr.open and ob.shadow
                and ob.cnt.get("пропуск: не вечер", 0) == 1))
 
+    # вечер + --evening-all: падение при тренде вниз → ставка ВВЕРХ; взлёт при тренде вниз → ставка ВНИЗ
+    def pump_series():
+        pts = [(t, c) for t, c in series(False)[:-4]]
+        last = pts[-1][1]
+        return pts + [(now - 4 * GRAN, last), (now - 3 * GRAN, last * (1 + 3 * vol)), (now - 2 * GRAN, last * (1 + 6 * vol)),
+                      (now - GRAN, last * (1 + 9 * vol))]
+
+    for name, data, want in (("frxDN", series(False), 1), ("frxPU", pump_series(), -1)):
+        ap_ = FakePub()
+        ap_.data[name] = data
+        atr = B.Trader(B.FakeClient(), 1, 15, 10 ** 9, 20, log=lambda *a: None, unit="m")
+        ab = FxBot(ap_, atr, 0.85, log=msgs.append)
+        ab.skip_hours, ab.evening_hours, ab.evening_all = None, (0, 24), True
+        ab.refresh_pairs([name])
+        ab.vol[name] = vol
+        ab.vol_t[name] = time.time()
+        ab.step()
+        dirs = [o.get("dir") for o in atr.open.values()]
+        ok.append((f"вечер, тренд вниз, {'падение → ВВЕРХ' if want > 0 else 'взлёт → ВНИЗ'} (--evening-all)", dirs == [want]))
+        if want > 0:                                                 # без --evening-all тот же сигнал не ставится
+            ap2 = FakePub()
+            ap2.data[name] = data
+            atr2 = B.Trader(B.FakeClient(), 1, 15, 10 ** 9, 20, log=lambda *a: None, unit="m")
+            ab2 = FxBot(ap2, atr2, 0.85, log=msgs.append)
+            ab2.skip_hours, ab2.evening_hours = None, (0, 24)
+            ab2.refresh_pairs([name])
+            ab2.vol[name] = vol
+            ab2.vol_t[name] = time.time()
+            ab2.step()
+            ok.append(("без --evening-all падение при тренде вниз не ставится", not atr2.open))
+
     # пара с долларом: тот же сигнал → без ставки, только тень
     up_ = FakePub()
     up_.data["frxEURUSD"] = series(True)
@@ -662,6 +708,8 @@ def main():
                     help="ставить и на пары с долларом (EURUSD, USDJPY…). По умолчанию на них только теневой журнал: по истории ~55%%")
     ap.add_argument("--only-evening", action="store_true",
                     help="ставить только вечером (20:00–03:00 мск); дневные сигналы — только в теневой журнал")
+    ap.add_argument("--evening-all", action="store_true",
+                    help="вечером ставить и при тренде 12 ч вниз: резкое падение → ВВЕРХ, резкий взлёт → ВНИЗ (по истории ~64%% и ~72%%)")
     ap.add_argument("--evening-x", type=float, default=1.0,
                     help="вечером (20:00–03:00 мск) ставка во столько раз больше, например 2. По умолчанию 1 — как днём")
     ap.add_argument("--no-trend-filter", action="store_true", help="ставить на все падения, без фильтра «тренд за 12 ч вверх»")
@@ -728,6 +776,7 @@ def main():
     bot.skip_hours = None if a.skip_hours.lower() == "none" else tuple(int(x) for x in a.skip_hours.split("-"))
     bot.evening_x = a.evening_x
     bot.only_evening = a.only_evening
+    bot.evening_all = a.evening_all
     bot.usd_pairs = a.with_usd
     bot.watch = [x for x in symbols if x in bot.pays]                # следим за всеми парами, где Deriv вообще даёт ставку на этот срок
     cmds = tg_notify.Commands(tg_handlers(trader, bot=bot))
