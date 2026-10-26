@@ -345,7 +345,7 @@ def run_one(symbol, candles, payout, synthetic, total):
         for name, parts in res.items():
             n = sum(m for _, m in parts)
             w = sum(int(v) for v, _ in parts)
-            if name.startswith("откат"):
+            if name.startswith(("откат", "по тренду")):
                 t = total.setdefault((name, mnt), [0, 0, []])
                 t[0] += w
                 t[1] += n
@@ -392,7 +392,7 @@ def main():
             print(f"{sym}: пропускаю — {type(e).__name__}: {str(e)[:150]}")
     confidence_report()
     if len(syms) > 1:
-        print("\nОБЩИЙ ИТОГ правил отката по всем парам:")
+        print(f"\nОБЩИЙ ИТОГ правил отката по всем парам ({', '.join(syms)}):")
         for (name, mnt), (w, n, pays) in sorted(total.items()):
             if not n:
                 continue
@@ -401,7 +401,8 @@ def main():
             be = 1 / (1 + float(np.mean(pays))) if pays else None
             tail = (f"; средний порог {100 * be:.1f}% → " + ("ВЫШЕ порога с запасом" if p - ci > be else
                     "не отличить от порога или ниже")) if be else ""
-            print(f"  {name[7:]:<34} {mnt} мин: {n} ставок, угадано {100 * p:.1f}% ± {100 * ci:.1f}{tail}")
+            short = name.split(": ", 1)[-1].replace("откат+", "").replace(" (в любой момент, в сторону тренда)", ", всегда")
+            print(f"  {short:<34} {mnt} мин: {n} ставок, угадано {100 * p:.1f}% ± {100 * ci:.1f}{tail}")
     print("\nКак читать: чтобы ставки были в плюсе, «угадано» должно быть ВЫШЕ порога безубыточности с запасом больше погрешности"
           "\n(±) и держаться во всех кусках. Окна ставок перекрываются, поэтому настоящая погрешность ещё больше напечатанной.")
 
