@@ -125,6 +125,7 @@ class FxBot:
         self.usd_pairs = False                                       # пары с долларом: только тень (флаг --with-usd — ставить и на них)
         self.evening_hours, self.evening_x = (17, 24), 1.0           # вечер (UTC, 20:00–03:00 мск): ставка × evening_x (флаг --evening-x)
         self.only_evening = False                                    # ставить только вечером, днём — только тень (флаг --only-evening)
+        self.london, self.london_hours = False, (7, 12)              # вместе с --only-evening: ставить ещё и 10:00–15:00 мск (флаг --london)
         self.evening_all = False                                     # вечером ставить и при тренде вниз: падение → вверх, взлёт → вниз
         self.shadow = []                                             # теневой журнал: ВСЕ сигналы (и поставленные, и пропущенные)
         self.shadow_path = SHADOW
@@ -214,7 +215,8 @@ class FxBot:
                 news = bool(self.skip_hours) and self.skip_hours[0] <= hour < self.skip_hours[1]
                 evening = self.evening_hours[0] <= hour < self.evening_hours[1]
                 fresh = j == len(cs) - 1 and time.time() - (cs[j][0] + GRAN) < 90
-                session = "новости" if news else "вечер" if evening else "спокойно"
+                london = self.london_hours[0] <= hour < self.london_hours[1]                                # Лондон до открытия Нью-Йорка: 10:00–15:00 мск
+                session = "новости" if news else "вечер" if evening else "лондон" if london else "спокойно"
                 if z >= self.k:                                     # резкий ВЗЛЁТ: в тень; вечером при тренде вниз (--evening-all) — ставка ВНИЗ
                     trp = self.trend12(s, cs[j][0])
                     self.shadow.append({"sym": s, "t": cs[j][0], "entry": cs[j][1], "z": z, "dir": -1,
@@ -249,7 +251,7 @@ class FxBot:
                     self.log(f"  СИГНАЛ {s} ({z:.1f}) в часы новостей США ({hour}:00 UTC) — только теневой журнал")
                     self.cnt["пропуск: часы новостей"] = self.cnt.get("пропуск: часы новостей", 0) + 1
                     continue
-                if self.only_evening and not evening:
+                if self.only_evening and not evening and not (self.london and london):
                     self.log(f"  СИГНАЛ {s} ({z:.1f}) днём ({hour}:00 UTC), ставим только вечером — только теневой журнал")
                     self.cnt["пропуск: не вечер"] = self.cnt.get("пропуск: не вечер", 0) + 1
                     continue
@@ -376,10 +378,12 @@ def shadow_text(path):
             + part(down, "падение → вверх, все", "По истории ~57%.")
             + part(d_up, "   из них тренд 12ч ВВЕРХ (бот ставит)", "По истории ~60%.")
             + part(d_dn, "   из них тренд 12ч вниз (без ставок)", "По истории ~54%.")
-            + part([r for r in d_up if len(r) >= 9 and r[8] in ("спокойно", "вечер")], "      тренд вверх, вне часов новостей (бот ставит)",
+            + part([r for r in d_up if len(r) >= 9 and r[8] in ("спокойно", "вечер", "лондон")], "      тренд вверх, вне часов новостей",
                    "По истории ~66%.")
             + part([r for r in d_up if len(r) >= 9 and r[8] == "вечер"], "         из них вечер 20–03 мск (ставка крупнее)",
-                   "По истории ~70%+.")
+                   "По истории ~67% (без перерыва Deriv 23:50–01:00 мск).")
+            + part([r for r in d_up if len(r) >= 9 and r[8] == "лондон" and not is_usd(r[1])],
+                   "         из них 10–15 мск, кроссы (ставит с --london)", "По истории ~61%, нужно ~55%.")
             + part([r for r in d_up if len(r) >= 9 and r[8] != "новости" and not is_usd(r[1])],
                    "      тренд вверх, вне новостей, КРОССЫ (бот ставит)", "По истории кроссы ~62% (все сигналы).")
             + part([r for r in d_up if len(r) >= 9 and r[8] != "новости" and is_usd(r[1])],
@@ -387,10 +391,10 @@ def shadow_text(path):
             + part([r for r in d_up if len(r) >= 9 and r[8] == "новости"], "      тренд вверх, 15–20 мск (новости, без ставок)",
                    "По истории ~51%.")
             + part([r for r in d_dn if len(r) >= 9 and r[8] == "вечер" and not is_usd(r[1])],
-                   "   падение, тренд вниз, ВЕЧЕР, кроссы (ставит с --evening-all)", "По истории ~64%.")
+                   "   падение, тренд вниз, ВЕЧЕР, кроссы (ставит с --evening-all)", "Без перерыва Deriv по истории ~50%.")
             + part(pump, "рост → вниз, все (только наблюдение)", "По истории ~54%.")
             + part([r for r in pump if len(r) >= 9 and r[7] == "вниз" and r[8] == "вечер" and not is_usd(r[1])],
-                   "   взлёт, тренд вниз, ВЕЧЕР, кроссы (ставит ВНИЗ с --evening-all)", "По истории ~72%.")
+                   "   взлёт, тренд вниз, ВЕЧЕР, кроссы (ставит ВНИЗ с --evening-all)", "Без перерыва Deriv по истории ~58%.")
             + part([r for r in pump if len(r) >= 8 and r[7] == "вниз"], "   из них тренд 12ч ВНИЗ", "Нужно 57%+.")
             + part([r for r in pump if len(r) >= 8 and r[7] == "вверх"], "   из них тренд 12ч вверх", ""))
 
@@ -646,6 +650,21 @@ def selftest():
             ab2.step()
             ok.append(("без --evening-all падение при тренде вниз не ставится", not atr2.open))
 
+    # --london: вне вечера, но в «лондонские» часы — ставка; без --london — только тень
+    for lon in (True, False):
+        lp = FakePub()
+        lp.data["frxUP"] = series(True)
+        ltr = B.Trader(B.FakeClient(), 1, 15, 10 ** 9, 20, log=lambda *a: None, unit="m")
+        lb = FxBot(lp, ltr, 0.85, log=msgs.append)
+        lb.skip_hours, lb.evening_hours, lb.only_evening = None, (0, 0), True
+        lb.london, lb.london_hours = lon, (0, 24)
+        lb.refresh_pairs(["frxUP"])
+        lb.vol["frxUP"] = vol
+        lb.vol_t["frxUP"] = time.time()
+        lb.step()
+        ok.append((f"--london {'вкл' if lon else 'выкл'}: {'ставка' if lon else 'только тень'}, в тени пометка «лондон»",
+                   len(ltr.open) == (1 if lon else 0) and lb.shadow[-1].get("session") == "лондон"))
+
     # пара с долларом: тот же сигнал → без ставки, только тень
     up_ = FakePub()
     up_.data["frxEURUSD"] = series(True)
@@ -708,8 +727,10 @@ def main():
                     help="ставить и на пары с долларом (EURUSD, USDJPY…). По умолчанию на них только теневой журнал: по истории ~55%%")
     ap.add_argument("--only-evening", action="store_true",
                     help="ставить только вечером (20:00–03:00 мск); дневные сигналы — только в теневой журнал")
+    ap.add_argument("--london", action="store_true",
+                    help="вместе с --only-evening ставить ещё и 10:00–15:00 мск (по истории ~61%%, на грани — для проверки на демо)")
     ap.add_argument("--evening-all", action="store_true",
-                    help="вечером ставить и при тренде 12 ч вниз: резкое падение → ВВЕРХ, резкий взлёт → ВНИЗ (по истории ~64%% и ~72%%)")
+                    help="вечером ставить и при тренде 12 ч вниз: падение → ВВЕРХ, взлёт → ВНИЗ. Без перерыва Deriv по истории ~50%% и ~58%% — НЕ советую")
     ap.add_argument("--evening-x", type=float, default=1.0,
                     help="вечером (20:00–03:00 мск) ставка во столько раз больше, например 2. По умолчанию 1 — как днём")
     ap.add_argument("--no-trend-filter", action="store_true", help="ставить на все падения, без фильтра «тренд за 12 ч вверх»")
@@ -776,6 +797,7 @@ def main():
     bot.skip_hours = None if a.skip_hours.lower() == "none" else tuple(int(x) for x in a.skip_hours.split("-"))
     bot.evening_x = a.evening_x
     bot.only_evening = a.only_evening
+    bot.london = a.london
     bot.evening_all = a.evening_all
     bot.usd_pairs = a.with_usd
     bot.watch = [x for x in symbols if x in bot.pays]                # следим за всеми парами, где Deriv вообще даёт ставку на этот срок
