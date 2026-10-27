@@ -34,7 +34,8 @@ INDICES = ["OTC_AEX", "OTC_AS51", "OTC_DJI", "OTC_FCHI", "OTC_FTSE", "OTC_GDAXI"
            "OTC_SSMI", "OTC_SX5E"]
 KS = (2.0, 2.5, 3.0, 4.0)
 HOURS = [(a, a + 3) for a in range(0, 24, 3)] + [(0, 24)]           # блоки по 3 часа (UTC) и «любое время»
-HORIZONS = (3, 6, 12)                                                # 15 / 30 / 60 минут
+HORIZONS = (3, 6, 12)
+DELAY = 0                                                # 15 / 30 / 60 минут
 TRENDS = ("вверх", "вниз", "любой")
 
 
@@ -65,16 +66,18 @@ def prepare(ts, c):
     return {"ts": ts, "c": c, "gaps": gaps, "z": z, "tr": tr, "hf": close_h, "n": n}
 
 
-def outcomes(p, h):
-    """win[i] — ставка ВВЕРХ от закрытия свечи i выиграла через h свечей; valid[i] — окно без перерывов и без перерыва Deriv."""
+def outcomes(p, h, d=0):
+    """up[i] — ставка ВВЕРХ выиграла через h свечей; вход по закрытию свечи i+d (d>0 — вход позже сигнала, проверка на
+    «выбросы» котировок). valid[i] — окно без перерывов в торговле и без перерыва Deriv."""
     n, c, gaps, hf = p["n"], p["c"], p["gaps"], p["hf"]
     valid = np.zeros(n, bool)
     up = np.zeros(n, bool)
     dn = np.zeros(n, bool)
-    valid[:n - h] = gaps[h:] == gaps[:n - h]
-    up[:n - h] = c[h:] > c[:n - h]
-    dn[:n - h] = c[h:] < c[:n - h]
-    pause = (hf < 22) & (hf + h * 5 / 60 > 20 + 50 / 60)             # ставка задела бы перерыв Deriv
+    m = n - h - d
+    valid[:m] = gaps[h + d:] == gaps[:m]
+    up[:m] = c[h + d:] > c[d:n - h]
+    dn[:m] = c[h + d:] < c[d:n - h]
+    pause = (hf < 22) & (hf + (h + d) * 5 / 60 > 20 + 50 / 60)       # ставка задела бы перерыв Deriv
     valid &= ~pause
     return valid, up, dn
 
@@ -111,7 +114,7 @@ def evaluate(prep, kind, k, trend, hrs, h):
         if (lo, hi) != (0, 24):
             m &= (hf >= lo) & (hf < hi)
         m &= valid
-        idx = bets(m, h)
+        idx = bets(m, h + DELAY)
         if not len(idx):
             continue
         win = (up if kind == "dip" else dn)[idx]
@@ -138,10 +141,13 @@ def main():
     ap.add_argument("--payout", type=float, default=0.78, help="выплата для порога безубыточности (0.78 → 56.2%%)")
     ap.add_argument("--min-bets", type=int, default=60, help="минимум ставок на куске поиска")
     ap.add_argument("--candles", type=int, default=60000)
+    ap.add_argument("--delay", type=int, default=0, help="вход на столько 5-минутных свечей позже сигнала (1 = через 5 мин)")
     ap.add_argument("--max-age-days", type=float, default=7, help="брать свечи из кэша, если они не старше стольких дней")
     a = ap.parse_args()
     syms = a.symbols.split(",") if a.symbols else FOREX + (INDICES if a.with_indices else [])
     be = 1 / (1 + a.payout)
+    global DELAY
+    DELAY = a.delay
     prep = {}
     order = sorted(syms)
     for j, s in enumerate(order):
@@ -156,10 +162,12 @@ def main():
             print(f"{s}: мало свечей, пропуск")
             continue
         p = prepare(ts, c)
-        prep[s] = ("поиск" if j % 2 == 0 else "проверка", p, {h: outcomes(p, h) for h in HORIZONS})
+        prep[s] = ("поиск" if j % 2 == 0 else "проверка", p, {h: outcomes(p, h, a.delay) for h in HORIZONS})
     groups = {g: [s for s, v in prep.items() if v[0] == g] for g in ("поиск", "проверка")}
     print(f"\nПары для ПОИСКА ({len(groups['поиск'])}): {', '.join(x.replace('frx', '') for x in groups['поиск'])}")
     print(f"Пары для ПРОВЕРКИ ({len(groups['проверка'])}): {', '.join(x.replace('frx', '') for x in groups['проверка'])}")
+    if a.delay:
+        print(f"ВХОД С ЗАДЕРЖКОЙ: через {5 * a.delay} мин после сигнала (если «откат» — это скачок котировки, он исчезнет).")
     print(f"Порог безубыточности при выплате {100 * a.payout:.0f}%: {100 * be:.1f}%\n")
 
     rules = [(kind, k, tr, hrs, h) for kind in ("dip", "pump") for k in KS for tr in TRENDS for hrs in HOURS for h in HORIZONS]
