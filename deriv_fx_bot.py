@@ -217,7 +217,10 @@ class FxBot:
                 evening = self.evening_hours[0] <= hour < self.evening_hours[1]
                 fresh = j == len(cs) - 1 and time.time() - (cs[j][0] + GRAN) < 90
                 london = self.london_hours[0] <= hour < self.london_hours[1]                                # Лондон до открытия Нью-Йорка: 10:00–15:00 мск
-                session = "новости" if news else "вечер" if evening else "лондон" if london else "спокойно"
+                hf = ((cs[j][0] + GRAN) % 86400) / 3600
+                pause = 20 + 20 / 60 <= hf < 22                        # перерыв Deriv (ставка на 30 мин его задела бы): в тени отдельно
+                session = ("перерыв" if pause else "новости" if news else "вечер" if evening else "лондон" if london
+                           else "спокойно")
                 if z >= self.k:                                     # резкий ВЗЛЁТ: в тень; вечером при тренде вниз (--evening-all) — ставка ВНИЗ
                     trp = self.trend12(s, cs[j][0])
                     self.shadow.append({"sym": s, "t": cs[j][0], "entry": cs[j][1], "z": z, "dir": -1,
@@ -392,6 +395,8 @@ def shadow_text(path):
                    "По истории ~66%.")
             + part([r for r in d_up if len(r) >= 9 and r[8] == "вечер"], "         из них вечер 20–03 мск (ставка крупнее)",
                    "По истории ~67% (без перерыва Deriv 23:50–01:00 мск).")
+            + part([r for r in d_up if len(r) >= 9 and r[8] == "перерыв"], "         перерыв Deriv 23:20–01:00 мск (ставки нельзя)",
+                   "Не в счёт: скачки котировок, по истории ~88%.")
             + part([r for r in d_up if len(r) >= 9 and r[8] == "лондон" and not is_usd(r[1])],
                    "         из них 10–15 мск, кроссы (ставит с --london)", "По истории ~61%, нужно ~55%.")
             + part([r for r in d_up if len(r) >= 9 and r[8] != "новости" and not is_usd(r[1])],
