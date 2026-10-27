@@ -84,11 +84,11 @@ class Public:
 MINUTES = 15                                                         # срок ставки (меняется флагом --minutes)
 
 
-def payout_15m(client, currency, symbol, stake=10.0, direction=1):
-    """Выплата в долях ставки для CALL (PUT при direction=-1) на MINUTES минут — на ТОЙ сумме, которую бот реально ставит."""
+def payout_15m(client, currency, symbol, stake=10.0, direction=1, minutes=None):
+    """Выплата в долях ставки для CALL (PUT при direction=-1) на MINUTES минут (или minutes) — на той сумме, которую бот ставит."""
     pr = client.call({"proposal": 1, "amount": stake, "basis": "stake", "contract_type": "CALL" if direction > 0 else "PUT",
                       "currency": currency,
-                      "duration": MINUTES, "duration_unit": "m", "underlying_symbol": symbol})["proposal"]
+                      "duration": minutes or MINUTES, "duration_unit": "m", "underlying_symbol": symbol})["proposal"]
     return float(pr["payout"]) / float(pr["ask_price"]) - 1
 
 
@@ -126,6 +126,7 @@ class FxBot:
         self.evening_hours, self.evening_x = (17, 24), 1.0           # вечер (UTC, 20:00–03:00 мск): ставка × evening_x (флаг --evening-x)
         self.only_evening = False                                    # ставить только вечером, днём — только тень (флаг --only-evening)
         self.london, self.london_hours = False, (7, 12)              # вместе с --only-evening: ставить ещё и 10:00–15:00 мск (флаг --london)
+        self.evening_minutes = None                                  # срок вечерних ставок, если не как у остальных (флаг --evening-minutes)
         self.evening_all = False                                     # вечером ставить и при тренде вниз: падение → вверх, взлёт → вниз
         self.shadow = []                                             # теневой журнал: ВСЕ сигналы (и поставленные, и пропущенные)
         self.shadow_path = SHADOW
@@ -255,7 +256,8 @@ class FxBot:
                     self.log(f"  СИГНАЛ {s} ({z:.1f}) днём ({hour}:00 UTC), ставим только вечером — только теневой журнал")
                     self.cnt["пропуск: не вечер"] = self.cnt.get("пропуск: не вечер", 0) + 1
                     continue
-                self._maybe_bet(s, z, cs[j][1], busy, self.evening_x if evening else 1.0)
+                self._maybe_bet(s, z, cs[j][1], busy, self.evening_x if evening else 1.0,
+                                minutes=self.evening_minutes if evening else None)
 
     def trend12(self, s, t_sig):
         """Тренд за ~12 часов ДО резкого падения: log(close[t-3] / close[t-144]) по 5-минутным свечам, без перерывов в торговле.
@@ -273,7 +275,7 @@ class FxBot:
             return None
         return math.log(cs[j - 3][1] / cs[j - 144][1])
 
-    def _maybe_bet(self, s, z, price, busy, mult=1.0, direction=1):
+    def _maybe_bet(self, s, z, price, busy, mult=1.0, direction=1, minutes=None):
         if s in busy:
             self.log(f"  СИГНАЛ {s} ({z:.1f} разброса), но по паре уже есть открытая ставка — пропуск")
             self.cnt["пропуск: пара занята"] += 1
@@ -282,8 +284,13 @@ class FxBot:
             self.log(f"  СИГНАЛ {s} ({z:.1f}), но открыто уже {len(self.tr.open)} ставок (лимит {self.max_open}) — пропуск")
             self.cnt["пропуск: лимит открытых"] += 1
             return
+        if minutes:                                             # ставка не должна задеть перерыв Deriv 20:50–22:00 UTC
+            h_now = (time.time() % 86400) / 3600
+            if h_now < 22 and h_now + minutes / 60 > 20 + 50 / 60:
+                minutes = None
+        mins = minutes or MINUTES
         try:
-            p = payout_15m(self.tr.c, self.tr.currency, s, self.tr.stake, direction)
+            p = payout_15m(self.tr.c, self.tr.currency, s, self.tr.stake, direction, mins)
         except Exception as e:  # noqa: BLE001
             self.log(f"  СИГНАЛ {s}, но цену ставки получить не удалось: {str(e)[:80]}")
             return
@@ -302,16 +309,19 @@ class FxBot:
         if mult != 1.0:                                         # вечером ставка крупнее (только на эту ставку)
             self.tr.stake = round(base * mult, 2)
         self.log(f"  СИГНАЛ {s}: {'падение' if direction > 0 else 'взлёт'} {abs(z):.1f} разброса за 15 мин, выплата {100 * p:.0f}% "
-                 f"→ {'ВВЕРХ' if direction > 0 else 'ВНИЗ'} на {MINUTES} мин, "
+                 f"→ {'ВВЕРХ' if direction > 0 else 'ВНИЗ'} на {mins} мин, "
                  f"ставка {self.tr.stake}" + (f" (вечер ×{mult:g})" if mult != 1.0 else ""))
+        expiry = self.tr.expiry
+        self.tr.expiry = mins
         try:
             if self.tr.place(s, direction, price, symbol=s):
                 self.cnt["поставлено"] += 1
+                list(self.tr.open.values())[-1]["minutes"] = mins
         except Exception as e:  # noqa: BLE001
             self.log(f"  {s}: ставка не прошла: {str(e)[:120]}")
             self.cnt["ошибка ставки"] += 1
         finally:
-            self.tr.stake = base
+            self.tr.stake, self.tr.expiry = base, expiry
 
 
 def breakdown(path):
@@ -435,7 +445,7 @@ def tg_handlers(trader, log_path=None, bot=None):
             return "📈 Открытых ставок нет."
         now = time.time()
         rows = [f"{o['base'].replace('frx', '')}: {'ВВЕРХ' if o.get('dir', 1) > 0 else 'ВНИЗ'}, ставка {o['stake']}, выплата {o['payout']:.2f}, "
-                f"до закрытия ~{max(0, int((o['t'] + trader.expiry * 60 - now) // 60))} мин" for o in trader.open.values()]
+                f"до закрытия ~{max(0, int((o['t'] + o.get('minutes', trader.expiry) * 60 - now) // 60))} мин" for o in trader.open.values()]
         return f"📈 Открытые ставки ({len(rows)}):\n" + "\n".join(rows)
 
     def history():
@@ -665,6 +675,21 @@ def selftest():
         ok.append((f"--london {'вкл' if lon else 'выкл'}: {'ставка' if lon else 'только тень'}, в тени пометка «лондон»",
                    len(ltr.open) == (1 if lon else 0) and lb.shadow[-1].get("session") == "лондон"))
 
+    # --evening-minutes 60: вечерняя ставка на 60 минут (если не задевает перерыв Deriv), после неё срок снова обычный
+    mp = FakePub()
+    mp.data["frxUP"] = series(True)
+    mtr = B.Trader(B.FakeClient(), 1, 15, 10 ** 9, 20, log=lambda *a: None, unit="m")
+    mb = FxBot(mp, mtr, 0.85, log=msgs.append)
+    mb.skip_hours, mb.evening_hours, mb.evening_minutes = None, (0, 24), 60
+    mb.refresh_pairs(["frxUP"])
+    mb.vol["frxUP"] = vol
+    mb.vol_t["frxUP"] = time.time()
+    mb.step()
+    h_now = (time.time() % 86400) / 3600
+    want = 15 if (h_now < 22 and h_now + 1 > 20 + 50 / 60) else 60
+    ok.append((f"--evening-minutes 60: ставка на {want} мин, потом срок снова 15",
+               [o.get("minutes") for o in mtr.open.values()] == [want] and mtr.expiry == 15))
+
     # пара с долларом: тот же сигнал → без ставки, только тень
     up_ = FakePub()
     up_.data["frxEURUSD"] = series(True)
@@ -731,6 +756,8 @@ def main():
                     help="вместе с --only-evening ставить ещё и 10:00–15:00 мск (по истории ~61%%, на грани — для проверки на демо)")
     ap.add_argument("--evening-all", action="store_true",
                     help="вечером ставить и при тренде 12 ч вниз: падение → ВВЕРХ, взлёт → ВНИЗ. Без перерыва Deriv по истории ~50%% и ~58%% — НЕ советую")
+    ap.add_argument("--evening-minutes", type=int, default=0, choices=[0, 15, 30, 60, 120],
+                    help="срок ВЕЧЕРНИХ ставок в минутах (0 — как --minutes). Ставка, которая задела бы перерыв Deriv, — на обычный срок")
     ap.add_argument("--evening-x", type=float, default=1.0,
                     help="вечером (20:00–03:00 мск) ставка во столько раз больше, например 2. По умолчанию 1 — как днём")
     ap.add_argument("--no-trend-filter", action="store_true", help="ставить на все падения, без фильтра «тренд за 12 ч вверх»")
@@ -799,6 +826,7 @@ def main():
     bot.only_evening = a.only_evening
     bot.london = a.london
     bot.evening_all = a.evening_all
+    bot.evening_minutes = a.evening_minutes or None
     bot.usd_pairs = a.with_usd
     bot.watch = [x for x in symbols if x in bot.pays]                # следим за всеми парами, где Deriv вообще даёт ставку на этот срок
     cmds = tg_notify.Commands(tg_handlers(trader, bot=bot))
