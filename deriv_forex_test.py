@@ -24,15 +24,15 @@ import deriv_ticks_test as T
 LAGS = 12
 
 
-def fetch_candles(symbol, total, gran=300, ws=None, pause=2.0):
+def fetch_candles(symbol, total, gran=300, ws=None, pause=2.0, max_age=86400):
     """5-минутные свечи (по 5000 за запрос, назад во времени), без дублей, по возрастанию времени: (время, close).
     Deriv ограничивает частоту таких запросов: между запросами пауза, при упоре в лимит — ожидание и повтор.
-    Скачанное сохраняется в research_cache (при повторном запуске в течение суток берётся оттуда)."""
+    Скачанное сохраняется в research_cache (при повторном запуске в течение max_age секунд берётся оттуда)."""
     global LAST_DOWNLOADED
     import os
     os.makedirs("research_cache", exist_ok=True)
     path = f"research_cache/DERIV_{symbol}_{gran}s_{total}.json"
-    if ws is None and os.path.exists(path) and time.time() - os.path.getmtime(path) < 86400:
+    if ws is None and os.path.exists(path) and time.time() - os.path.getmtime(path) < max_age:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
         print(f"Свечи {symbol} взяты из кэша: {len(d['t'])}")
